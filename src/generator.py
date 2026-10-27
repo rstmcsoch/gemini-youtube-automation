@@ -214,192 +214,262 @@ def generate_lesson_content(lesson_title):
         raise
 
 
-# def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title=None, slide_number=0, total_slides=0):
-#     """Generates a single professional, PPT-style slide or a thumbnail."""
-#     output_dir.mkdir(exist_ok=True, parents=True)
-#     is_thumbnail = thumbnail_title is not None
+# def _make_gradient_background(width, height, seed_text=""):
+    """Create a polished, dependency-free tech background when stock imagery is unavailable."""
+    from PIL import ImageDraw
 
-#     width, height = (1920, 1080) if video_type == 'long' else (1080, 1920)
-#     title = thumbnail_title if is_thumbnail else slide_content.get("title", "")
-#     bg_image = get_pexels_image(title, video_type)
+    top = (7, 13, 29)
+    bottom = (20, 25, 49)
+    image = Image.new("RGB", (width, height))
+    draw = ImageDraw.Draw(image)
 
-#     if not bg_image:
-#         bg_image = Image.new('RGBA', (width, height), color=(12, 17, 29))
-#     bg_image = bg_image.resize((width, height)).filter(ImageFilter.GaussianBlur(5))
-#     darken_layer = Image.new('RGBA', bg_image.size, (0, 0, 0, 150))
-#     final_bg = Image.alpha_composite(bg_image, darken_layer).convert("RGB")
-#     if is_thumbnail and video_type == 'long':
-#         w, h = final_bg.size
-#         if h > w:
-#             print("⚠️ Detected vertical thumbnail for long video. Rotating and resizing to 1920x1080...")
-#             final_bg = final_bg.transpose(Image.ROTATE_270).resize((1920, 1080))
-#     draw = ImageDraw.Draw(final_bg)
+    # Draw a smooth vertical gradient in horizontal bands without per-pixel Python loops.
+    band = 6
+    for y in range(0, height, band):
+        ratio = y / max(1, height - 1)
+        color = tuple(int(top[i] * (1 - ratio) + bottom[i] * ratio) for i in range(3))
+        draw.rectangle((0, y, width, min(height, y + band),), fill=color)
 
-#     try:
-#         title_font = ImageFont.truetype(str(FONT_FILE), 80 if video_type == 'long' else 90)
-#         content_font = ImageFont.truetype(str(FONT_FILE), 45 if video_type == 'long' else 55)
-#         footer_font = ImageFont.truetype(str(FONT_FILE), 25 if video_type == 'long' else 35)
-#     except IOError:
-#         title_font = content_font = footer_font = FALLBACK_THUMBNAIL_FONT
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    deco = ImageDraw.Draw(overlay)
+    scale = min(width, height)
+    # Large, low-contrast rings and circuit-like rails keep the fallback from looking empty.
+    cx, cy = int(width * 0.82), int(height * 0.25)
+    for multiplier, alpha in [(0.20, 30), (0.32, 23), (0.45, 16)]:
+        radius = int(scale * multiplier)
+        deco.ellipse(
+            (cx - radius, cy - radius, cx + radius, cy + radius),
+            outline=(46, 168, 255, alpha),
+            width=max(2, int(scale * 0.002)),
+        )
+    rail_y = int(height * 0.78)
+    for offset in range(0, width, max(80, int(width * 0.055))):
+        deco.line(
+            (offset, rail_y, min(width, offset + int(width * 0.12)), rail_y),
+            fill=(48, 154, 211, 34),
+            width=max(1, int(scale * 0.0015)),
+        )
+    # Small warm accent matches the project's existing visual identity.
+    accent_x = int(width * 0.08)
+    deco.rounded_rectangle(
+        (accent_x, int(height * 0.11), accent_x + max(12, int(width * 0.035)), int(height * 0.11) + max(5, int(height * 0.007))),
+        radius=max(2, int(scale * 0.004)),
+        fill=(255, 113, 0, 220),
+    )
+    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
-#     if not is_thumbnail:
-#         header_height = int(height * 0.18)
-#         draw.rectangle([0, 0, width, header_height], fill=(25, 40, 65, 200))
-#         title_bbox = draw.textbbox((0, 0), title, font=title_font)
-#         title_x = (width - (title_bbox[2] - title_bbox[0])) / 2
-#         title_y = (header_height - (title_bbox[3] - title_bbox[1])) / 2
-#         draw.text((title_x, title_y), title, font=title_font, fill=(255, 255, 255))
-#     else:
-#         title_bbox = draw.textbbox((0, 0), title, font=title_font)
-#         title_x = (width - (title_bbox[2] - title_bbox[0])) / 2
-#         title_y = (height - (title_bbox[3] - title_bbox[1])) / 2
-#         draw.text((title_x, title_y), title, font=title_font, fill=(255, 255, 255), stroke_width=2, stroke_fill="black")
 
-#     if not is_thumbnail:
-#         content = slide_content.get("content", "")
-#         is_special_slide = len(content.split()) < 10
+def _load_visual_font(size):
+    try:
+        return ImageFont.truetype(str(FONT_FILE), size)
+    except Exception:
+        return ImageFont.load_default()
 
-#         words = content.split()
-#         lines = []
-#         current_line = ""
-#         for word in words:
-#             test_line = f"{current_line} {word}".strip()
-#             if draw.textbbox((0, 0), test_line, font=content_font)[2] < width * 0.85:
-#                 current_line = test_line
-#             else:
-#                 lines.append(current_line)
-#                 current_line = word
-#         lines.append(current_line)
 
-#         line_height = content_font.getbbox("A")[3] + 15
-#         total_text_height = len(lines) * line_height
-#         y_text = (height - total_text_height) / 2 if is_special_slide else header_height + 100
+def _wrap_visual_text(text, font, draw, max_width):
+    """Wrap text to a pixel width using the active PIL font."""
+    words = str(text or "").split()
+    lines = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        box = draw.textbbox((0, 0), candidate, font=font)
+        if box[2] - box[0] <= max_width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+                current = word
+            else:
+                # Split a single unusually long token to prevent horizontal clipping.
+                fragment = ""
+                for char in word:
+                    trial = fragment + char
+                    bounds = draw.textbbox((0, 0), trial, font=font)
+                    if bounds[2] - bounds[0] <= max_width or not fragment:
+                        fragment = trial
+                    else:
+                        lines.append(fragment)
+                        fragment = char
+                current = fragment
+    if current:
+        lines.append(current)
+    return lines or [""]
 
-#         for line in lines:
-#             line_bbox = draw.textbbox((0, 0), line, font=content_font)
-#             line_x = (width - (line_bbox[2] - line_bbox[0])) / 2
-#             draw.text((line_x, y_text), line, font=content_font, fill=(230, 230, 230))
-#             y_text += line_height
 
-#         footer_height = int(height * 0.06)
-#         draw.rectangle([0, height - footer_height, width, height], fill=(25, 40, 65, 200))
-#         draw.text((40, height - footer_height + 12), f"AI for Developers by {YOUR_NAME}", font=footer_font, fill=(180, 180, 180))
-#         if total_slides > 0:
-#             slide_num_text = f"Slide {slide_number} of {total_slides}"
-#             slide_num_bbox = draw.textbbox((0, 0), slide_num_text, font=footer_font)
-#             draw.text((width - slide_num_bbox[2] - 40, height - footer_height + 12), slide_num_text, font=footer_font, fill=(180, 180, 180))
-#     file_prefix = "thumbnail" if is_thumbnail else f"slide_{slide_number:02d}"
-#     path = output_dir / f"{file_prefix}.png"
-#     final_bg.save(path)
-#     return str(path)
+def _fit_visual_text(text, draw, max_width, max_height, start_size, min_size, max_lines=4, gap=12):
+    """Choose a readable font size and wrapped layout that fits its box."""
+    size = start_size
+    while size >= min_size:
+        font = _load_visual_font(size)
+        lines = _wrap_visual_text(text, font, draw, max_width)
+        sample = draw.textbbox((0, 0), "Ag", font=font)
+        line_height = max(1, sample[3] - sample[1]) + gap
+        if len(lines) <= max_lines and len(lines) * line_height <= max_height:
+            return font, lines, line_height
+        size -= 2
+    font = _load_visual_font(min_size)
+    lines = _wrap_visual_text(text, font, draw, max_width)
+    sample = draw.textbbox((0, 0), "Ag", font=font)
+    line_height = max(1, sample[3] - sample[1]) + gap
+    return font, lines, line_height
+
 
 def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title=None, slide_number=0, total_slides=0):
-    """Generates a single professional, PPT-style slide or a thumbnail with corrected alignment."""
+    """Render readable AI-course slides and distinct, correctly-sized thumbnails."""
+    output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
     is_thumbnail = thumbnail_title is not None
+    is_long = video_type == "long"
+    width, height = (1920, 1080) if is_long else (1080, 1920)
+    title = str(thumbnail_title if is_thumbnail else (slide_content or {}).get("title", "") or "")
+    content = str((slide_content or {}).get("content", "") or "")
 
-    width, height = (1920, 1080) if video_type == 'long' else (1080, 1920)
-    title = thumbnail_title if is_thumbnail else slide_content.get("title", "")
-    bg_image = get_pexels_image(title, video_type)
+    background = None
+    try:
+        # Pexels is optional. If the API is paused or no key is configured, use our
+        # built-in designed background instead of a flat black frame.
+        background = get_pexels_image(title, video_type)
+    except Exception as exc:
+        print(f"⚠️ Stock image unavailable; using designed fallback background: {exc}")
 
-    if not bg_image:
-        bg_image = Image.new('RGBA', (width, height), color=(12, 17, 29))
-    bg_image = bg_image.resize((width, height)).filter(ImageFilter.GaussianBlur(5))
-    darken_layer = Image.new('RGBA', bg_image.size, (0, 0, 0, 150))
-    final_bg = Image.alpha_composite(bg_image, darken_layer).convert("RGB")
-
-    if is_thumbnail and video_type == 'long':
-        w, h = final_bg.size
-        if h > w:
-            print("⚠️ Detected vertical thumbnail for long video. Rotating and resizing to 1920x1080...")
-            final_bg = final_bg.transpose(Image.ROTATE_270).resize((1920, 1080))
+    if background is not None:
+        try:
+            background = background.convert("RGBA").resize((width, height)).filter(ImageFilter.GaussianBlur(12))
+            shade = Image.new("RGBA", (width, height), (5, 10, 24, 172))
+            final_bg = Image.alpha_composite(background, shade).convert("RGB")
+        except Exception:
+            final_bg = _make_gradient_background(width, height, title)
+    else:
+        final_bg = _make_gradient_background(width, height, title)
 
     draw = ImageDraw.Draw(final_bg)
+    accent = (255, 113, 0)
+    cyan = (63, 180, 238)
+    white = (248, 250, 255)
+    muted = (202, 214, 231)
 
-    try:
-        title_font = ImageFont.truetype(str(FONT_FILE), 80 if video_type == 'long' else 90)
-        content_font = ImageFont.truetype(str(FONT_FILE), 45 if video_type == 'long' else 55)
-        footer_font = ImageFont.truetype(str(FONT_FILE), 25 if video_type == 'long' else 35)
-    except IOError:
-        title_font = content_font = footer_font = FALLBACK_THUMBNAIL_FONT
-
-    if not is_thumbnail:
-        # Header background
-        header_height = int(height * 0.18)
-        draw.rectangle([0, 0, width, header_height], fill=(25, 40, 65, 200))
-
-        # Wrap title text if needed
-        words = title.split()
-        title_lines = []
-        current_line = ""
-        for word in words:
-            test_line = f"{current_line} {word}".strip()
-            bbox = draw.textbbox((0, 0), test_line, font=title_font)
-            if bbox[2] - bbox[0] < width * 0.9:
-                current_line = test_line
-            else:
-                title_lines.append(current_line)
-                current_line = word
-        title_lines.append(current_line)
-
-        # Center vertically in header
-        line_height = title_font.getbbox("A")[3] + 10
-        total_title_height = len(title_lines) * line_height
-        y_text = (header_height - total_title_height) / 2
-
-        for line in title_lines:
-            bbox = draw.textbbox((0, 0), line, font=title_font)
-            x = (width - (bbox[2] - bbox[0])) / 2
-            draw.text((x, y_text), line, font=title_font, fill=(255, 255, 255))
-            y_text += line_height
-    else:
-        # Center title on thumbnail
-        bbox = draw.textbbox((0, 0), title, font=title_font)
-        x = (width - (bbox[2] - bbox[0])) / 2
-        y = (height - (bbox[3] - bbox[1])) / 2
-        draw.text((x, y), title, font=title_font, fill=(255, 255, 255), stroke_width=2, stroke_fill="black")
-
-    if not is_thumbnail:
-        # Main content block
-        content = slide_content.get("content", "")
-        is_special_slide = len(content.split()) < 10
-
-        words = content.split()
-        lines = []
-        current_line = ""
-        for word in words:
-            test_line = f"{current_line} {word}".strip()
-            if draw.textbbox((0, 0), test_line, font=content_font)[2] < width * 0.85:
-                current_line = test_line
-            else:
-                lines.append(current_line)
-                current_line = word
-        lines.append(current_line)
-
-        line_height = content_font.getbbox("A")[3] + 15
-        total_text_height = len(lines) * line_height
-        y_text = (height - total_text_height) / 2 if is_special_slide else header_height + 100
-
+    if is_thumbnail:
+        # A strong central card and adaptive title size prevent cropped titles.
+        margin_x = int(width * 0.07)
+        margin_y = int(height * 0.18)
+        draw.rounded_rectangle(
+            (margin_x, margin_y, width - margin_x, height - margin_y),
+            radius=max(16, int(min(width, height) * 0.035)),
+            fill=(8, 15, 31),
+            outline=(45, 104, 154),
+            width=max(2, int(min(width, height) * 0.003)),
+        )
+        draw.rounded_rectangle(
+            (int(width * 0.18), int(height * 0.32), int(width * 0.18) + int(width * 0.12), int(height * 0.32) + max(8, int(height * 0.012))),
+            radius=max(4, int(min(width, height) * 0.008)),
+            fill=accent,
+        )
+        title_top = int(height * 0.38)
+        title_bottom = int(height * 0.72)
+        font, lines, line_height = _fit_visual_text(
+            title, draw, int(width * 0.78), title_bottom - title_top,
+            start_size=104 if is_long else 88,
+            min_size=40,
+            max_lines=4,
+            gap=16,
+        )
+        total_height = len(lines) * line_height
+        y = title_top + max(0, (title_bottom - title_top - total_height) // 2)
         for line in lines:
-            bbox = draw.textbbox((0, 0), line, font=content_font)
-            x = (width - (bbox[2] - bbox[0])) / 2
-            draw.text((x, y_text), line, font=content_font, fill=(230, 230, 230))
-            y_text += line_height
+            box = draw.textbbox((0, 0), line, font=font)
+            x = (width - (box[2] - box[0])) // 2
+            draw.text((x, y), line, font=font, fill=white, stroke_width=1, stroke_fill=(0, 0, 0))
+            y += line_height
+        kicker = "AI FOR DEVELOPERS  •  VIDEO AUTOMATION"
+        kicker_font = _load_visual_font(max(20, int(min(width, height) * 0.022)))
+        kicker_box = draw.textbbox((0, 0), kicker, font=kicker_font)
+        draw.text(((width - (kicker_box[2] - kicker_box[0])) // 2, int(height * 0.79)), kicker, font=kicker_font, fill=cyan)
+    else:
+        header_height = int(height * (0.23 if is_long else 0.18))
+        outer_margin = int(width * 0.045)
+        draw.rounded_rectangle(
+            (outer_margin, int(height * 0.045), width - outer_margin, header_height),
+            radius=max(12, int(min(width, height) * 0.025)),
+            fill=(14, 31, 57),
+            outline=(43, 100, 151),
+            width=max(2, int(min(width, height) * 0.002)),
+        )
+        draw.rounded_rectangle(
+            (outer_margin + 18, int(height * 0.075), outer_margin + max(35, int(width * 0.012)), int(height * 0.075) + max(12, int(height * 0.12))),
+            radius=max(4, int(min(width, height) * 0.008)),
+            fill=accent,
+        )
+        title_left = int(width * 0.09)
+        title_width = int(width * 0.82)
+        font, title_lines, title_line_height = _fit_visual_text(
+            title, draw, title_width, int(header_height * 0.72),
+            start_size=82 if is_long else 80,
+            min_size=42,
+            max_lines=3,
+            gap=8,
+        )
+        total_title_height = len(title_lines) * title_line_height
+        title_y = max(int(height * 0.055), int(height * 0.045) + (header_height - int(height * 0.045) - total_title_height) // 2)
+        for line in title_lines:
+            box = draw.textbbox((0, 0), line, font=font)
+            x = (width - (box[2] - box[0])) // 2
+            draw.text((x, title_y), line, font=font, fill=white)
+            title_y += title_line_height
 
-        # Footer
-        footer_height = int(height * 0.06)
-        draw.rectangle([0, height - footer_height, width, height], fill=(25, 40, 65, 200))
-        draw.text((40, height - footer_height + 12), f"AI for Developers by {YOUR_NAME}", font=footer_font, fill=(180, 180, 180))
+        footer_height = int(height * 0.065)
+        content_top = header_height + int(height * 0.055)
+        content_bottom = height - footer_height - int(height * 0.055)
+        panel_left = int(width * 0.07)
+        panel_right = width - panel_left
+        draw.rounded_rectangle(
+            (panel_left, content_top, panel_right, content_bottom),
+            radius=max(12, int(min(width, height) * 0.025)),
+            fill=(7, 14, 30),
+            outline=(33, 63, 98),
+            width=max(2, int(min(width, height) * 0.0018)),
+        )
+        is_special_slide = len(content.split()) < 10
+        body_start = 64 if is_special_slide and is_long else 68 if is_special_slide else 46 if is_long else 50
+        body_min = 34 if is_long else 36
+        available_height = content_bottom - content_top - int(height * 0.08)
+        body_font, body_lines, body_line_height = _fit_visual_text(
+            content, draw, int(width * 0.78), available_height,
+            start_size=body_start,
+            min_size=body_min,
+            max_lines=18 if is_long else 22,
+            gap=12,
+        )
+        # Center compact intro/outro content. Longer content begins near the panel top.
+        total_body_height = len(body_lines) * body_line_height
+        if is_special_slide:
+            body_y = content_top + max(int(height * 0.04), (content_bottom - content_top - total_body_height) // 2)
+        else:
+            body_y = content_top + int(height * 0.075)
+        for line in body_lines:
+            box = draw.textbbox((0, 0), line, font=body_font)
+            x = (width - (box[2] - box[0])) // 2
+            draw.text((x, body_y), line, font=body_font, fill=muted)
+            body_y += body_line_height
 
+        # Consistent footer and slide number.
+        footer_y = height - footer_height
+        draw.rectangle((0, footer_y, width, height), fill=(10, 20, 39))
+        draw.rectangle((0, footer_y, width, footer_y + max(4, int(height * 0.004))), fill=accent)
+        footer_text = "AI for Developers  •  by Chaitanya"
+        footer_font = _load_visual_font(max(18, int(min(width, height) * 0.022)))
+        draw.text((int(width * 0.035), footer_y + int(footer_height * 0.30)), footer_text, font=footer_font, fill=(176, 193, 215))
         if total_slides > 0:
-            slide_num_text = f"Slide {slide_number} of {total_slides}"
-            bbox = draw.textbbox((0, 0), slide_num_text, font=footer_font)
-            draw.text((width - bbox[2] - 40, height - footer_height + 12), slide_num_text, font=footer_font, fill=(180, 180, 180))
+            number_text = f"SLIDE {slide_number} / {total_slides}"
+            number_font = _load_visual_font(max(16, int(min(width, height) * 0.018)))
+            box = draw.textbbox((0, 0), number_text, font=number_font)
+            draw.text((width - int(width * 0.035) - (box[2] - box[0]), footer_y + int(footer_height * 0.33)), number_text, font=number_font, fill=cyan)
 
-    file_prefix = "thumbnail" if is_thumbnail else f"slide_{slide_number:02d}"
-    path = output_dir / f"{file_prefix}.png"
-    final_bg.save(path)
-    return str(path)
+    file_prefix = "thumbnail_long" if is_thumbnail and is_long else "thumbnail_short" if is_thumbnail else f"slide_{slide_number:02d}"
+    out_path = output_dir / f"{file_prefix}.png"
+    final_bg.save(out_path)
+    return str(out_path)
+
 
 def create_video(slide_paths, audio_paths, output_path, video_type):
     """Creates a final video from slides and per-slide audio clips with optional background music."""
