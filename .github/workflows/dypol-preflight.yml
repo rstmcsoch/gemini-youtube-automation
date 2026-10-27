@@ -1,0 +1,99 @@
+name: DYPOL Engine A preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  visual-and-policy-preflight:
+    if: github.ref_name == 'dypol-integration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout selected integration branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Engine A dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile-check and verify draft/privacy guards
+        run: |
+          set -euo pipefail
+          python -m compileall -q dypol_control.py main.py src
+          python - <<'PY'
+          from dypol_control import resolve_policy, build_insert_body, verify_insert_body, PolicyViolation
+          policy = resolve_policy({"DYPOL_PHASE": "draft"})
+          assert policy.allow_generate and not policy.allow_upload
+          body = build_insert_body("Preflight test", "No API call", ["preflight"], "private")
+          verify_insert_body(body, "private")
+          try:
+              verify_insert_body(body, "public")
+          except PolicyViolation:
+              pass
+          else:
+              raise AssertionError("Privacy guard did not refuse an unexpected visibility")
+          print("Syntax and draft/privacy policy checks passed; no external API was called.")
+          PY
+
+      - name: Render sample visuals without Pexels or Gemini API calls
+        env:
+          PEXELS_API_KEY: ''
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from PIL import Image
+          os.environ.pop("PEXELS_API_KEY", None)
+          from src.generator import generate_visuals
+          root = Path("preflight-output")
+          items = [
+              ("long-thumbnail", "long", {"thumbnail_title": "How AI agents automate video creation"}, (1920, 1080)),
+              ("short-thumbnail", "short", {"thumbnail_title": "Quick Tip: How AI agents automate video creation"}, (1080, 1920)),
+              ("long-slide", "long", {"slide_content": {"title": "Video as a Software Pipeline", "content": "A useful slide should be readable, visually balanced, and fit inside the canvas without clipping."}, "slide_number": 1, "total_slides": 3}, (1920, 1080)),
+              ("short-slide", "short", {"slide_content": {"title": "AI Agent Workflow", "content": "Plan. Create the script. Generate narration. Build visuals. Assemble a video. Review before publishing."}, "slide_number": 1, "total_slides": 3}, (1080, 1920)),
+          ]
+          report = []
+          for name, video_type, kwargs, expected_size in items:
+              out_dir = root / name
+              path = Path(generate_visuals(out_dir, video_type, **kwargs))
+              with Image.open(path) as image:
+                  actual_size = image.size
+                  image.verify()
+              assert actual_size == expected_size, f"{name}: expected {expected_size}, got {actual_size}"
+              assert path.is_file() and path.stat().st_size > 2000, f"{name}: output too small or missing"
+              report.append({"name": name, "path": str(path), "size": list(actual_size), "bytes": path.stat().st_size})
+          paths = [item["path"] for item in report if "thumbnail" in item["name"]]
+          assert len(set(paths)) == 2, "Long and Short thumbnail paths are not distinct"
+          (root / "preflight-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+          print(json.dumps(report, indent=2))
+          print("Pexels-free visuals and distinct thumbnail checks passed.")
+          PY
+
+      - name: Upload visual preflight preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: dypol-engine-a-visual-preflight
+          path: preflight-output/
+          retention-days: 7
+          if-no-files-found: error
+
+  wrong-branch:
+    if: github.ref_name != 'dypol-integration'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require integration branch
+        run: |
+          echo "::error::Select the dypol-integration branch in Run workflow."
+          exit 1
