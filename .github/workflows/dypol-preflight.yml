@@ -2,6 +2,14 @@ name: DYPOL Engine A preflight
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - dypol-integration
+    paths:
+      - "src/generator.py"
+      - "main.py"
+      - "dypol_control.py"
+      - ".github/workflows/dypol-preflight.yml"
 
 permissions:
   contents: read
@@ -33,11 +41,17 @@ jobs:
           python -m compileall -q dypol_control.py main.py src
           python - <<'PY'
           import inspect
+          from PIL import Image, ImageDraw
           import src.generator as generator
           from dypol_control import resolve_policy, build_insert_body, verify_insert_body, PolicyViolation
           helper = getattr(generator, "_make_gradient_background", None)
           assert callable(helper), "Gradient fallback helper is missing or commented out"
           assert "def _make_gradient_background" in inspect.getsource(generator), "Gradient fallback helper source is missing"
+          safe_rect = getattr(generator, "_safe_rounded_rectangle", None)
+          assert callable(safe_rect), "Safe rounded-rectangle helper is missing"
+          # Reproduce the narrow rounded accent that caused the earlier ValueError.
+          geometry_probe = Image.new("RGB", (200, 100), "black")
+          safe_rect(ImageDraw.Draw(geometry_probe), (104, 10, 121, 58), radius=8, fill=(255, 113, 0))
           policy = resolve_policy({"DYPOL_PHASE": "draft"})
           assert policy.allow_generate and not policy.allow_upload
           body = build_insert_body("Preflight test", "No API call", ["preflight"], "private")
