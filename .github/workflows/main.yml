@@ -87,10 +87,16 @@ jobs:
           pip install -r requirements.txt
           echo "✅ Dependencies installed."
 
-      - name: 🔑 Restore API credentials from base64
+      - name: 🔑 Restore YouTube credentials only for an explicitly permitted upload phase
+        if: ${{ inputs.phase == 'publish' || (inputs.phase == 'full' && inputs.auto_publish == '1' && inputs.review_required == '0') }}
         run: |
-          echo "${{ secrets.CLIENT_SECRET_B64 }}" | base64 -d > client_secrets.json
-          echo "${{ secrets.CREDENTIALS_B64 }}" | base64 -d > credentials.json
+          set -euo pipefail
+          if [ -z "${{ secrets.CLIENT_SECRET_B64 }}" ] || [ -z "${{ secrets.CREDENTIALS_B64 }}" ]; then
+            echo "::error::YouTube OAuth secrets are missing; upload was not attempted."
+            exit 2
+          fi
+          printf '%s' "${{ secrets.CLIENT_SECRET_B64 }}" | base64 -d > client_secrets.json
+          printf '%s' "${{ secrets.CREDENTIALS_B64 }}" | base64 -d > credentials.json
         shell: bash
 
       - name: Validate DYPOL job ID
