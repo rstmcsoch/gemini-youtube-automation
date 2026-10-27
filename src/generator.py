@@ -86,7 +86,7 @@ def get_pexels_image(query, video_type):
     """Searches for a relevant image on Pexels and returns the image object."""
     pexels_api_key = os.getenv("PEXELS_API_KEY")
     if not pexels_api_key:
-        print("⚠️ PEXELS_API_KEY not found. Using solid color background.")
+        print("ℹ️ PEXELS_API_KEY not configured; using the built-in designed background.")
         return None
 
     orientation = 'landscape' if video_type == 'long' else 'portrait'
@@ -395,9 +395,26 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
             outline=(43, 100, 151),
             width=max(2, int(min(width, height) * 0.002)),
         )
+        # Keep the accent tab wide enough for Pillow's rounded-corner geometry.
+        accent_x0 = outer_margin + 18
+        accent_x1 = min(width - outer_margin, accent_x0 + max(64, int(width * 0.055)))
+        accent_y0 = int(height * 0.075)
+        accent_y1 = min(
+            header_height - max(8, int(height * 0.025)),
+            accent_y0 + max(18, int(height * 0.045)),
+        )
+        accent_radius = max(2, min(
+            int(min(width, height) * 0.008),
+            max(1, (accent_x1 - accent_x0) // 2 - 1),
+            max(1, (accent_y1 - accent_y0) // 2 - 1),
+        ))
+        if accent_x1 <= accent_x0 or accent_y1 <= accent_y0:
+            raise ValueError(
+                f"Invalid accent-tab geometry: {(accent_x0, accent_y0, accent_x1, accent_y1)}"
+            )
         draw.rounded_rectangle(
-            (outer_margin + 18, int(height * 0.075), outer_margin + max(35, int(width * 0.012)), int(height * 0.075) + max(12, int(height * 0.12))),
-            radius=max(4, int(min(width, height) * 0.008)),
+            (accent_x0, accent_y0, accent_x1, accent_y1),
+            radius=accent_radius,
             fill=accent,
         )
         title_left = int(width * 0.09)
