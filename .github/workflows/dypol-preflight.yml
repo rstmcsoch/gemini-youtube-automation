@@ -29,9 +29,15 @@ jobs:
       - name: Compile-check and verify draft/privacy guards
         run: |
           set -euo pipefail
+          echo "Preflight checkout SHA: $(git rev-parse HEAD)"
           python -m compileall -q dypol_control.py main.py src
           python - <<'PY'
+          import inspect
+          import src.generator as generator
           from dypol_control import resolve_policy, build_insert_body, verify_insert_body, PolicyViolation
+          helper = getattr(generator, "_make_gradient_background", None)
+          assert callable(helper), "Gradient fallback helper is missing or commented out"
+          assert "def _make_gradient_background" in inspect.getsource(generator), "Gradient fallback helper source is missing"
           policy = resolve_policy({"DYPOL_PHASE": "draft"})
           assert policy.allow_generate and not policy.allow_upload
           body = build_insert_body("Preflight test", "No API call", ["preflight"], "private")
@@ -42,7 +48,7 @@ jobs:
               pass
           else:
               raise AssertionError("Privacy guard did not refuse an unexpected visibility")
-          print("Syntax and draft/privacy policy checks passed; no external API was called.")
+          print("Gradient helper import, syntax, and draft/privacy policy checks passed; no external API was called.")
           PY
 
       - name: Render sample visuals without Pexels or Gemini API calls
