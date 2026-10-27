@@ -139,6 +139,16 @@
       "title": "The Future of AI Development: What's Next for AI Builders? (Looking at the Horizon of AI Innovation)",
       "status": "pending",
       "youtube_id": null
+    },
+    {
+      "chapter": "Ad-hoc",
+      "part": "Topic input",
+      "title": "How AI agents automate video creation",
+      "topic": "How AI agents automate video creation",
+      "status": "draft_ready",
+      "youtube_id": null,
+      "origin": "dypol-topic-override",
+      "uploads": []
     }
   ]
 }
