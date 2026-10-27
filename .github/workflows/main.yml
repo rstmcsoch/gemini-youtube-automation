@@ -69,6 +69,27 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: 🧪 Compile-check code and verify safe phase defaults
+        run: |
+          set -euo pipefail
+          python -m compileall -q dypol_control.py main.py src
+          python - <<'PY'
+          from dypol_control import (
+              resolve_policy, build_insert_body, verify_insert_body, PolicyViolation
+          )
+          draft = resolve_policy({"DYPOL_PHASE": "draft"})
+          assert draft.allow_generate and not draft.allow_upload, draft
+          body = build_insert_body("Test", "Preflight only", ["test"], "private")
+          verify_insert_body(body, "private")
+          try:
+              verify_insert_body(body, "public")
+          except PolicyViolation:
+              pass
+          else:
+              raise AssertionError("Wrong visibility was not rejected")
+          print("DYPOL policy preflight passed; no API call made.")
+          PY
+
       - name: 📦 Install dependencies and patch ImageMagick
         run: |
           sudo apt-get update
