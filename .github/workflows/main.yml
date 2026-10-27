@@ -93,6 +93,17 @@ jobs:
           echo "${{ secrets.CREDENTIALS_B64 }}" | base64 -d > credentials.json
         shell: bash
 
+      - name: Validate DYPOL job ID
+        env:
+          JOB_ID: ${{ inputs.job_id || github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$JOB_ID" =~ ^[A-Za-z0-9._-]{1,100}$ ]]; then
+            echo "::error::job_id may contain only letters, numbers, dot, underscore, and hyphen."
+            exit 2
+          fi
+
+
       - name: Validate publish handoff
         if: ${{ inputs.phase == 'publish' }}
         env:
