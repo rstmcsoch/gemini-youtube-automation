@@ -4,6 +4,47 @@ on:
   schedule:
     - cron: '0 7 * * *' # 12:30 PM IST daily
   workflow_dispatch:
+    inputs:
+      phase:
+        description: 'draft creates candidate only; publish uploads the saved candidate'
+        required: true
+        default: 'draft'
+        type: choice
+        options: [draft, publish, full]
+      topic:
+        description: 'Optional lesson topic'
+        required: false
+        default: ''
+      privacy:
+        description: 'YouTube visibility; keep private for initial testing'
+        required: true
+        default: 'private'
+        type: choice
+        options: [private, unlisted, public]
+      job_id:
+        description: 'Stable DYPOL job ID used to connect draft and publish'
+        required: false
+        default: ''
+      draft_run_id:
+        description: 'GitHub Actions run ID that produced the approved draft; required for publish'
+        required: false
+        default: ''
+      review_required:
+        description: 'Keep 1 to require review and block full-phase upload'
+        required: true
+        default: '1'
+      auto_publish:
+        description: 'Set 1 only if automatic publishing is intentionally enabled'
+        required: true
+        default: '0'
+      title_override:
+        description: 'Optional reviewed title for the long-form video'
+        required: false
+        default: ''
+      description_override:
+        description: 'Optional reviewed description for the long-form video'
+        required: false
+        default: ''
 
 # A run takes far longer than the gap between a manual dispatch and the daily
 # schedule, so serialise them — two runs pushing to main race each other.
@@ -51,12 +92,62 @@ jobs:
           echo "${{ secrets.CREDENTIALS_B64 }}" | base64 -d > credentials.json
         shell: bash
 
-      - name: 🚀 Run Autonomous Production Pipeline
+      - name: Validate publish handoff
+        if: ${{ inputs.phase == 'publish' }}
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          DRAFT_RUN_ID: ${{ inputs.draft_run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$JOB_ID" ] || [ -z "$DRAFT_RUN_ID" ]; then
+            echo "::error::phase=publish requires both job_id and draft_run_id from the approved draft run."
+            exit 2
+          fi
+
+      - name: Download approved candidate (publish phase only)
+        if: ${{ inputs.phase == 'publish' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: dypol-candidate-${{ inputs.job_id }}
+          run-id: ${{ inputs.draft_run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: output
+
+
+      - name: 🚀 Run DYPOL phase-aware production pipeline
         id: production-run
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          GEMINI_TEXT_MODEL: ${{ vars.GEMINI_TEXT_MODEL || 'gemini-3.8-flash' }}
+          DYPOL_PHASE: ${{ inputs.phase || 'draft' }}
+          DYPOL_TOPIC: ${{ inputs.topic || '' }}
+          DYPOL_JOB_ID: ${{ inputs.job_id || github.run_id }}
+          DYPOL_REVIEW_REQUIRED: ${{ inputs.review_required || '1' }}
+          DYPOL_AUTO_PUBLISH: ${{ inputs.auto_publish || '0' }}
+          DYPOL_TITLE_OVERRIDE: ${{ inputs.title_override || '' }}
+          DYPOL_DESCRIPTION_OVERRIDE: ${{ inputs.description_override || '' }}
+          YOUTUBE_PRIVACY_STATUS: ${{ inputs.privacy || 'private' }}
         run: python main.py
+
+      - name: 📦 Save draft candidate for later approved publishing
+        if: ${{ success() && inputs.phase != 'publish' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dypol-candidate-${{ inputs.job_id || github.run_id }}
+          path: output/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 🗂️ Upload verified DYPOL run result backup
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dypol-result-${{ github.run_id }}
+          path: output/upload_results.json
+          retention-days: 14
+          if-no-files-found: ignore
 
       - name: 🔎 Upload Audio Artifact for Debugging
         if: always()
@@ -86,39 +177,27 @@ jobs:
             echo "⚠️ No long video found in output/, skipping GIF creation."
           fi
 
-      - name: 💾 Commit and push content plan and demo GIF
+      - name: 💾 Commit plan and verified run result to the current branch
         if: steps.production-run.outcome == 'success'
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-
-          # The production run takes long enough that main can move on beneath us,
-          # which makes a plain push a non-fast-forward. Both files are generated
-          # artifacts, so replay this run's copies onto whatever main is now.
-          STAGING=$(mktemp -d)
-          cp content_plan.json "$STAGING/"
-          if [ -f images/demo.gif ]; then cp images/demo.gif "$STAGING/"; fi
-
-          for attempt in 1 2 3; do
-            git fetch origin main
-            git reset --hard origin/main
-
-            cp "$STAGING/content_plan.json" content_plan.json
-            if [ -f "$STAGING/demo.gif" ]; then cp "$STAGING/demo.gif" images/demo.gif; fi
-
-            git add content_plan.json images/demo.gif
-            if git diff --cached --quiet; then
-              echo "✅ Nothing to commit — main is already up to date."
-              exit 0
-            fi
-
-            git commit -m "feat: Update content plan and demo GIF after daily video production"
-            if git push; then
-              echo "✅ Pushed on attempt $attempt."
-              exit 0
-            fi
-            echo "⚠️ Push rejected on attempt $attempt — main moved again, retrying..."
-          done
-
-          echo "❌ Could not push after 3 attempts."
-          exit 1
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          mkdir -p dypol-results
+          if [ -f output/upload_results.json ]; then
+            cp output/upload_results.json "dypol-results/$RUN_ID.json"
+          fi
+          git add content_plan.json
+          if [ -f images/demo.gif ]; then git add images/demo.gif; fi
+          if [ -f "dypol-results/$RUN_ID.json" ]; then git add "dypol-results/$RUN_ID.json"; fi
+          if git diff --cached --quiet; then
+            echo "No generated state changes to commit."
+            exit 0
+          fi
+          git commit -m "dypol: save plan and verified result for run $RUN_ID"
+          git fetch origin "$BRANCH_NAME"
+          git rebase "origin/$BRANCH_NAME"
+          git push origin "HEAD:$BRANCH_NAME"
