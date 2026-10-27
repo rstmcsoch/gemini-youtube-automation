@@ -227,7 +227,8 @@ def _safe_rounded_rectangle(draw, box, radius=8, **kwargs):
         x0, x1 = x1, x0
     if y1 < y0:
         y0, y1 = y1, y0
-    max_radius = max(0, min((x1 - x0 - 1) // 2, (y1 - y0 - 1) // 2))
+    # Pillow's inner rectangle subtracts radius + 1 from both sides.
+    max_radius = max(0, min((x1 - x0 - 2) // 2, (y1 - y0 - 2) // 2))
     safe_radius = max(0, min(int(radius), max_radius))
     draw.rounded_rectangle((x0, y0, x1, y1), radius=safe_radius, **kwargs)
 
