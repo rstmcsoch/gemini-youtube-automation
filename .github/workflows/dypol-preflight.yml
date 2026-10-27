@@ -2,6 +2,14 @@ name: DYPOL Engine A preflight
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - dypol-integration
+    paths:
+      - "src/generator.py"
+      - "main.py"
+      - "dypol_control.py"
+      - ".github/workflows/dypol-preflight.yml"
 
 permissions:
   contents: read
