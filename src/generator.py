@@ -16,6 +16,53 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from pathlib import Path
 from pydub import AudioSegment
 
+# Gemini text generation fallback: 503/429 responses are transient service or capacity
+# conditions. Try a small, documented model cascade instead of failing the entire job.
+def _generate_text_with_fallback(client, prompt, task_name="text generation"):
+    primary = (os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash").strip()
+    configured_fallbacks = os.environ.get(
+        "GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.5-flash-lite"
+    )
+    model_names = [primary] + [
+        item.strip() for item in configured_fallbacks.split(",") if item.strip()
+    ]
+    # Keep order stable and avoid calling the same model twice.
+    model_names = list(dict.fromkeys(model_names))
+    last_error = None
+
+    for index, model_name in enumerate(model_names):
+        try:
+            response = client.models.generate_content(model=model_name, contents=prompt)
+            if not getattr(response, "text", None):
+                raise RuntimeError(f"Gemini returned an empty response for model {model_name}.")
+            if index:
+                print(f"✅ {task_name} succeeded with fallback model: {model_name}")
+            return response
+        except Exception as exc:
+            last_error = exc
+            message = str(exc).upper()
+            code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+            transient = (
+                code in (408, 429, 500, 502, 503, 504)
+                or any(token in message for token in (
+                    "429", "500", "502", "503", "504",
+                    "UNAVAILABLE", "RESOURCE_EXHAUSTED",
+                    "INTERNAL SERVER ERROR", "TIMED OUT", "TIMEOUT",
+                ))
+            )
+            if not transient or index == len(model_names) - 1:
+                raise
+            print(
+                f"⚠️ {task_name} model {model_name} returned a transient service error; "
+                f"trying fallback {model_names[index + 1]}."
+            )
+            time.sleep(min(2 ** index, 4))
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("No Gemini text models were configured.")
+
+
 # --- Configuration ---
 ASSETS_PATH = Path("assets")
 FONT_FILE = ASSETS_PATH / "fonts/arial.ttf"
@@ -130,7 +177,7 @@ def generate_curriculum(previous_titles=None):
         Respond with ONLY a valid JSON object. The object must contain a key "lessons" which is a list of 20 lesson objects.
         Each lesson object must have these keys: "chapter", "part", "title", "status" (defaulted to "pending"), and "youtube_id" (defaulted to null).
         """
-        response = client.models.generate_content(model=os.environ.get('GEMINI_TEXT_MODEL', 'gemini-3.8-flash'), contents=prompt)
+        response = _generate_text_with_fallback(client, prompt, task_name='curriculum generation')
         json_string = response.text.strip().replace("```json", "").replace("```", "")
         curriculum = json.loads(json_string)
         print("✅ New curriculum generated successfully!")
@@ -157,7 +204,7 @@ def generate_lesson_content(lesson_title):
 
         Return only valid JSON.
         """
-        response = client.models.generate_content(model=os.environ.get('GEMINI_TEXT_MODEL', 'gemini-3.8-flash'), contents=prompt)
+        response = _generate_text_with_fallback(client, prompt, task_name='lesson content generation')
         json_string = response.text.strip().replace("```json", "").replace("```", "")
         content = json.loads(json_string)
         print("✅ Lesson content generated successfully.")
