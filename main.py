@@ -200,15 +200,22 @@ def main():
         policy = resolve_policy()
         print(f"Policy: {policy.describe()}")
         plan = get_content_plan()
-        result = execute_phase(
-            policy,
-            generate_fn=generate_lesson_assets,
-            upload_fn=upload_candidate_asset,
-            plan=plan,
-            candidate_root=OUTPUT_DIR / "candidates",
-            results_path=OUTPUT_DIR / "upload_results.json",
-            run_id=os.environ.get("GITHUB_RUN_ID", ""),
-        )
+        try:
+            result = execute_phase(
+                policy,
+                generate_fn=generate_lesson_assets,
+                upload_fn=upload_candidate_asset,
+                plan=plan,
+                candidate_root=OUTPUT_DIR / "candidates",
+                results_path=OUTPUT_DIR / "upload_results.json",
+                run_id=os.environ.get("GITHUB_RUN_ID", ""),
+            )
+        except Exception:
+            # execute_phase records partial/failed uploads before raising; persist
+            # that state too, so the next run does not forget an upload attempt.
+            update_content_plan(plan)
+            print("Content plan saved after failed or partial phase.")
+            raise
         update_content_plan(plan)
         print("Content plan saved.")
         print(json.dumps(result, indent=2))
