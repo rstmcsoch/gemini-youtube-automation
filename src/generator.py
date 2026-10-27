@@ -214,6 +214,24 @@ def generate_lesson_content(lesson_title):
         raise
 
 
+def _safe_rounded_rectangle(draw, box, radius=8, **kwargs):
+    """Draw a rounded rectangle with radius clamped to its actual dimensions.
+
+    Pillow's rounded-rectangle implementation draws an inner rectangle after
+    subtracting the corner radius. If a decorative bar is narrower than twice
+    that radius, it can pass an inverted x-coordinate and raise ValueError.
+    Normalize the box and clamp the radius before calling Pillow.
+    """
+    x0, y0, x1, y1 = (int(value) for value in box)
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
+    max_radius = max(0, min((x1 - x0 - 1) // 2, (y1 - y0 - 1) // 2))
+    safe_radius = max(0, min(int(radius), max_radius))
+    draw.rounded_rectangle((x0, y0, x1, y1), radius=safe_radius, **kwargs)
+
+
 def _make_gradient_background(width, height, seed_text=""):
     """Create a polished, dependency-free tech background when stock imagery is unavailable."""
     from PIL import ImageDraw
@@ -251,7 +269,7 @@ def _make_gradient_background(width, height, seed_text=""):
         )
     # Small warm accent matches the project's existing visual identity.
     accent_x = int(width * 0.08)
-    deco.rounded_rectangle(
+    _safe_rounded_rectangle(deco,
         (accent_x, int(height * 0.11), accent_x + max(12, int(width * 0.035)), int(height * 0.11) + max(5, int(height * 0.007))),
         radius=max(2, int(scale * 0.004)),
         fill=(255, 113, 0, 220),
@@ -353,14 +371,14 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
         # A strong central card and adaptive title size prevent cropped titles.
         margin_x = int(width * 0.07)
         margin_y = int(height * 0.18)
-        draw.rounded_rectangle(
+        _safe_rounded_rectangle(draw,
             (margin_x, margin_y, width - margin_x, height - margin_y),
             radius=max(16, int(min(width, height) * 0.035)),
             fill=(8, 15, 31),
             outline=(45, 104, 154),
             width=max(2, int(min(width, height) * 0.003)),
         )
-        draw.rounded_rectangle(
+        _safe_rounded_rectangle(draw,
             (int(width * 0.18), int(height * 0.32), int(width * 0.18) + int(width * 0.12), int(height * 0.32) + max(8, int(height * 0.012))),
             radius=max(4, int(min(width, height) * 0.008)),
             fill=accent,
@@ -388,7 +406,7 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
     else:
         header_height = int(height * (0.23 if is_long else 0.18))
         outer_margin = int(width * 0.045)
-        draw.rounded_rectangle(
+        _safe_rounded_rectangle(draw,
             (outer_margin, int(height * 0.045), width - outer_margin, header_height),
             radius=max(12, int(min(width, height) * 0.025)),
             fill=(14, 31, 57),
@@ -412,7 +430,7 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
             raise ValueError(
                 f"Invalid accent-tab geometry: {(accent_x0, accent_y0, accent_x1, accent_y1)}"
             )
-        draw.rounded_rectangle(
+        _safe_rounded_rectangle(draw,
             (accent_x0, accent_y0, accent_x1, accent_y1),
             radius=accent_radius,
             fill=accent,
@@ -439,7 +457,7 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
         content_bottom = height - footer_height - int(height * 0.055)
         panel_left = int(width * 0.07)
         panel_right = width - panel_left
-        draw.rounded_rectangle(
+        _safe_rounded_rectangle(draw,
             (panel_left, content_top, panel_right, content_bottom),
             radius=max(12, int(min(width, height) * 0.025)),
             fill=(7, 14, 30),
