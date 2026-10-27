@@ -7,8 +7,10 @@ on:
       - dypol-integration
     paths:
       - "src/generator.py"
+      - "src/uploader.py"
       - "main.py"
       - "dypol_control.py"
+      - ".github/workflows/main.yml"
       - ".github/workflows/dypol-preflight.yml"
 
 permissions:
