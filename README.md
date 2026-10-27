@@ -135,9 +135,15 @@ Go to **Settings → Secrets and variables → Actions** and add:
 | Secret | Description |
 | --- | --- |
 | `GOOGLE_API_KEY` | Gemini API key from Google AI Studio |
-| `PEXELS_API_KEY` | Pexels API key |
-| `CLIENT_SECRET_B64` | YouTube OAuth `client_secrets.json` encoded in base64 |
-| `CREDENTIALS_B64` | YouTube OAuth `credentials.json` encoded in base64 |
+| `PEXELS_API_KEY` | Optional Pexels API key; the built-in designed background is used when absent |
+| `YOUTUBE_CLIENT_SECRETS_JSON` | Full OAuth client JSON downloaded from Google Cloud Console |
+| `YOUTUBE_CREDENTIALS_JSON` | Authorized OAuth credentials JSON containing the YouTube upload scope and refresh token |
+
+The YouTube OAuth secrets are only read for an explicitly started `publish` run (or the separately gated `full` mode). Normal `draft` runs do not load the YouTube OAuth secrets or upload videos.
+
+For the first private upload test, create a Google Cloud project, enable YouTube Data API v3, and configure an OAuth consent screen. Create a **Web application** OAuth client with this authorized redirect URI: `https://developers.google.com/oauthplayground`. In OAuth 2.0 Playground, select your own OAuth credentials, set access type to **Offline**, force the consent screen, and authorize `https://www.googleapis.com/auth/youtube.upload`. Exchange the authorization code for tokens, then use a local JSON helper to combine the downloaded client file and token response into `credentials.json`. Store the complete client file in `YOUTUBE_CLIENT_SECRETS_JSON` and the generated credentials file in `YOUTUBE_CREDENTIALS_JSON` through GitHub repository Actions secrets. Never place these files in the repository or share them publicly.
+
+Google documents that refresh tokens issued while an external OAuth app is in Testing mode expire after seven days for scopes like YouTube upload. Production automation may require updating the consent-screen publishing status and satisfying Google's applicable verification requirements. See [YouTube OAuth setup](https://developers.google.com/youtube/data/guides/auth/installed-apps), [videos.insert authorization](https://developers.google.com/youtube/data/reference/rest/v3/videos/insert), and [OAuth Playground](https://developers.google.com/oauthplayground/).
 
 ### 4. Run locally
 
