@@ -95,7 +95,7 @@ def generate_lesson_assets(lesson):
     create_video(slide_paths, slide_audio_paths, long_video_path, 'long')
 
     long_thumb_path = generate_visuals(
-        output_dir=OUTPUT_DIR,
+        output_dir=OUTPUT_DIR / f"thumbnails_long_{unique_id}",
         video_type='long',
         thumbnail_title=lesson['title']
     )
@@ -125,7 +125,7 @@ def generate_lesson_assets(lesson):
     create_video([short_slide_path], [short_audio_path], short_video_path, 'short')
 
     short_thumb_path = generate_visuals(
-        output_dir=OUTPUT_DIR,
+        output_dir=OUTPUT_DIR / f"thumbnails_short_{unique_id}",
         video_type='short',
         thumbnail_title=f"Quick Tip: {lesson['title']}"
     )
