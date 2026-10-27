@@ -108,16 +108,36 @@ jobs:
           pip install -r requirements.txt
           echo "✅ Dependencies installed."
 
-      - name: 🔑 Restore YouTube credentials only for an explicitly permitted upload phase
+      - name: 🔑 Restore YouTube OAuth JSON only for an explicitly permitted upload phase
         if: ${{ inputs.phase == 'publish' || (inputs.phase == 'full' && inputs.auto_publish == '1' && inputs.review_required == '0') }}
+        env:
+          YOUTUBE_CLIENT_SECRETS_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRETS_JSON }}
+          YOUTUBE_CREDENTIALS_JSON: ${{ secrets.YOUTUBE_CREDENTIALS_JSON }}
         run: |
           set -euo pipefail
-          if [ -z "${{ secrets.CLIENT_SECRET_B64 }}" ] || [ -z "${{ secrets.CREDENTIALS_B64 }}" ]; then
-            echo "::error::YouTube OAuth secrets are missing; upload was not attempted."
+          if [ -z "${YOUTUBE_CLIENT_SECRETS_JSON:-}" ] || [ -z "${YOUTUBE_CREDENTIALS_JSON:-}" ]; then
+            echo "::error::YouTube OAuth JSON secrets are missing. Add YOUTUBE_CLIENT_SECRETS_JSON and YOUTUBE_CREDENTIALS_JSON in Settings > Secrets and variables > Actions. Upload was not attempted."
             exit 2
           fi
-          printf '%s' "${{ secrets.CLIENT_SECRET_B64 }}" | base64 -d > client_secrets.json
-          printf '%s' "${{ secrets.CREDENTIALS_B64 }}" | base64 -d > credentials.json
+          printf '%s' "$YOUTUBE_CLIENT_SECRETS_JSON" > client_secrets.json
+          printf '%s' "$YOUTUBE_CREDENTIALS_JSON" > credentials.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          client = json.loads(Path("client_secrets.json").read_text(encoding="utf-8"))
+          if not any(key in client for key in ("installed", "web")):
+              raise SystemExit("Client secret JSON is missing the installed/web OAuth configuration.")
+          creds = json.loads(Path("credentials.json").read_text(encoding="utf-8"))
+          required = ("client_id", "client_secret", "refresh_token", "token_uri")
+          missing = [key for key in required if not creds.get(key)]
+          if missing:
+              raise SystemExit("OAuth credential JSON is missing required fields: " + ", ".join(missing))
+          scopes = creds.get("scopes") or []
+          if "https://www.googleapis.com/auth/youtube.upload" not in scopes:
+              raise SystemExit("OAuth credential JSON does not include the youtube.upload scope.")
+          print("YouTube OAuth JSON validated. Secret values were not printed.")
+          PY
         shell: bash
 
       - name: Validate DYPOL job ID
