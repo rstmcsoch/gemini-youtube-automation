@@ -39,7 +39,10 @@ def get_authenticated_service():
         credentials = Credentials.from_authorized_user_file(str(CREDENTIALS_FILE), YOUTUBE_UPLOAD_SCOPE)
 
     if not credentials or not credentials.valid:
-        if credentials and credentials.expired and credentials.refresh_token:
+        # A token can be invalid even if its expiry is absent or malformed.
+        # Prefer refreshing with the saved refresh token instead of opening an
+        # interactive OAuth flow inside a headless GitHub Actions runner.
+        if credentials and credentials.refresh_token:
             credentials.refresh(Request())
         else:
             if not CLIENT_SECRETS_FILE.exists():
