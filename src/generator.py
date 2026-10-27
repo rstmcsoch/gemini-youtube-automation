@@ -214,7 +214,7 @@ def generate_lesson_content(lesson_title):
         raise
 
 
-# def _make_gradient_background(width, height, seed_text=""):
+def _make_gradient_background(width, height, seed_text=""):
     """Create a polished, dependency-free tech background when stock imagery is unavailable."""
     from PIL import ImageDraw
 
