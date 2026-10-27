@@ -15,6 +15,9 @@ from src.generator import (
     YOUR_NAME
 )
 from src.uploader import upload_to_youtube
+from dypol_control import (
+    resolve_policy, execute_phase, CandidateNotFound, PolicyViolation, save_plan,
+)
 
 CONTENT_PLAN_FILE = Path("content_plan.json")
 OUTPUT_DIR = Path("output")
@@ -44,12 +47,11 @@ def get_content_plan():
 
 
 def update_content_plan(plan):
-    with open(CONTENT_PLAN_FILE, 'w') as f:
-        json.dump(plan, f, indent=2)
+    save_plan(CONTENT_PLAN_FILE, plan)
 
 
 
-def produce_lesson_videos(lesson):
+def generate_lesson_assets(lesson):
     print(f"\n▶️ Starting production for Lesson: '{lesson['title']}'")
     chapter_safe = re.sub(r'[^\w]', '_', str(lesson['chapter'])).strip('_')
     part_safe = re.sub(r'[^\w]', '_', str(lesson['part'])).strip('_')
@@ -128,105 +130,102 @@ def produce_lesson_videos(lesson):
         thumbnail_title=f"Quick Tip: {lesson['title']}"
     )
 
-    print("\n📤 Uploading to YouTube...")
     hashtags = lesson_content.get("hashtags", "#AI #Developer #LearnAI")
-    long_desc = f"Part of the 'AI for Developers' series by {YOUR_NAME}.\n\nToday's Lesson: {lesson['title']}\n\n{hashtags}"
-    long_tags = "AI, Artificial Intelligence, Developer, Programming, Tutorial, " + lesson['title'].replace(" ", ", ")
-
-    long_video_id = upload_to_youtube(
-        long_video_path,
-        lesson['title'],
-        long_desc,
-        long_tags,
-        long_thumb_path
+    long_desc = (
+        f"Part of the 'AI for Developers' series by {YOUR_NAME}.\n\n"
+        f"Today's Lesson: {lesson['title']}\n\n{hashtags}"
+    )
+    long_tags = "AI, Artificial Intelligence, Developer, Programming, Tutorial, " + lesson["title"].replace(" ", ", ")
+    highlight = (lesson_content.get("short_form_highlight") or "").strip()
+    if not highlight:
+        highlight = f"AI Quick Tip: {lesson['title']}"
+    short_title = f"{highlight[:90].rstrip()} #Shorts"
+    short_desc = (
+        f"{highlight}\n\nWatch the full lesson on our channel.\n\n{hashtags}"
     )
 
-    if long_video_id:
-        print("⏳ Waiting 30 seconds before uploading the short...")
-        time.sleep(30)
-        highlight = (lesson_content.get('short_form_highlight') or '').strip()
-        if not highlight:
-            highlight = f"AI Quick Tip: {lesson['title']}"
-        short_title = f"{highlight[:90].rstrip()} #Shorts"
-        # short_desc = f"Watch the full lesson with {YOUR_NAME} here: https://www.youtube.com/watch?v={long_video_id}\n\n#AI #Programming #Tech #Developer"
-        short_desc = (f"{lesson_content['short_form_highlight']}\n\n"
-                      f"Watch the full lesson with {YOUR_NAME} here: https://www.youtube.com/watch?v={long_video_id}\n\n"
-                      f"{hashtags}")
-        upload_to_youtube(
-            short_video_path,
-            short_title.strip(),
-            short_desc,
-            "AI,Shorts,TechTip",
-            short_thumb_path
-        )
-        return long_video_id
-    return None
+    # Generation is deliberately separate from upload. The candidate and media
+    # are saved first; the publish phase can only upload this exact candidate.
+    return {
+        "job_id": os.environ.get("DYPOL_JOB_ID", ""),
+        "lesson_title": lesson["title"],
+        "assets": [
+            {
+                "kind": "long",
+                "path": str(long_video_path),
+                "thumb_path": str(long_thumb_path),
+                "title": lesson["title"],
+                "description": long_desc,
+                "tags": long_tags,
+            },
+            {
+                "kind": "short",
+                "path": str(short_video_path),
+                "thumb_path": str(short_thumb_path),
+                "title": short_title,
+                "description": short_desc,
+                "tags": "AI,Shorts,TechTip",
+            },
+        ],
+    }
+
+def upload_candidate_asset(asset, policy):
+    """Upload one saved candidate asset and return its verified YouTube record."""
+    title_override = os.environ.get("DYPOL_TITLE_OVERRIDE", "").strip()
+    description_override = os.environ.get("DYPOL_DESCRIPTION_OVERRIDE", "").strip()
+    kind = asset.get("kind", "video")
+    title = asset.get("title", "")
+    description = asset.get("description", "")
+    if kind == "long":
+        title = title_override or title
+        description = description_override or description
+    elif title_override:
+        title = f"{title_override[:88].rstrip()} #Shorts"
+    return upload_to_youtube(
+        asset["path"],
+        title,
+        description,
+        asset.get("tags", ""),
+        asset.get("thumb_path"),
+        kind=kind,
+    )
 
 
 def main():
-    print("🚀 Starting Autonomous AI Course Generator")
-    print(f"📁 Current working dir: {os.getcwd()}")
-    print(f"📁 OUTPUT_DIR: {OUTPUT_DIR.resolve()}")
-
+    print("DYPOL phase-aware AI Course Generator")
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Output directory: {OUTPUT_DIR.resolve()}")
     try:
-        OUTPUT_DIR.mkdir(exist_ok=True)
-        print(f"📁 Created output folder: {OUTPUT_DIR.exists()}")
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        policy = resolve_policy()
+        print(f"Policy: {policy.describe()}")
         plan = get_content_plan()
-        pending = [(i, lesson) for i, lesson in enumerate(plan['lessons']) if lesson['status'] == 'pending']
-
-        if not pending:
-            print("🎉 All lessons produced! Generating new content plan to restart from scratch...")
-
-            previous_titles = [lesson['title'] for lesson in plan['lessons']]
-            new_plan = generate_curriculum(previous_titles=previous_titles)  # 🔁 Pass prior titles
-            update_content_plan(new_plan)
-            plan = new_plan
-            pending = [(i, lesson) for i, lesson in enumerate(new_plan['lessons']) if lesson['status'] == 'pending']
-            if not pending:
-                print("⚠️ Curriculum generated but no valid lessons found.")
-                return
-
-        failed_lessons = []
-        for lesson_index, lesson in pending[:LESSONS_PER_RUN]:
-            try:
-                video_id = produce_lesson_videos(lesson)
-                if video_id:
-                    for original_lesson in plan['lessons']:
-                        if original_lesson['title'].strip().lower() == lesson['title'].strip().lower():
-                            original_lesson['status'] = 'complete'
-                            original_lesson['youtube_id'] = video_id
-                            print(f"✅ Completed lesson: {lesson['title']}")
-                            break
-                    else:
-                        print(f"⚠️ Could not find lesson in plan to mark as complete: {lesson['title']}")
-                else:
-                    print(f"❌ Upload failed (no video ID returned): {lesson['title']}")
-                    failed_lessons.append(lesson['title'])
-            except Exception as e:
-                print(f"❌ Failed producing lesson: {lesson['title']}")
-                traceback.print_exc()
-                failed_lessons.append(lesson['title'])
-            finally:
-                update_content_plan(plan)
-                print("📦 Content plan saved.")
-
-        if failed_lessons:
-            print(f"\n❌ PIPELINE FAILED — {len(failed_lessons)} lesson(s) did not complete:")
-            for title in failed_lessons:
-                print(f"   - {title}")
-            sys.exit(1)
-
-    except Exception as e:
-        print("❌ Critical error in main()")
+        result = execute_phase(
+            policy,
+            generate_fn=generate_lesson_assets,
+            upload_fn=upload_candidate_asset,
+            plan=plan,
+            candidate_root=OUTPUT_DIR / "candidates",
+            results_path=OUTPUT_DIR / "upload_results.json",
+            run_id=os.environ.get("GITHUB_RUN_ID", ""),
+        )
+        update_content_plan(plan)
+        print("Content plan saved.")
+        print(json.dumps(result, indent=2))
+    except (CandidateNotFound, PolicyViolation) as exc:
+        print(f"Phase refused safely: {exc}")
+        sys.exit(2)
+    except Exception:
+        print("Pipeline failed.")
         traceback.print_exc()
         sys.exit(1)
 
     try:
         for file in OUTPUT_DIR.glob("*.wav"):
             file.unlink()
-            print(f"🧹 Deleted: {file}")
-    except Exception as e:
-        print(f"⚠️ Could not clean up .wav files: {e}")
+            print(f"Deleted temporary audio: {file}")
+    except Exception as exc:
+        print(f"Warning: could not clean temporary WAV files: {exc}")
 
 if __name__ == "__main__":
     main()
