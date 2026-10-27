@@ -4,6 +4,47 @@ on:
   schedule:
     - cron: '0 7 * * *' # 12:30 PM IST daily
   workflow_dispatch:
+    inputs:
+      phase:
+        description: 'draft creates candidate only; publish uploads a saved candidate'
+        required: true
+        default: 'draft'
+        type: choice
+        options: [draft, publish, full]
+      topic:
+        description: 'Optional lesson topic'
+        required: false
+        default: ''
+      privacy:
+        description: 'YouTube visibility'
+        required: true
+        default: 'private'
+        type: choice
+        options: [private, unlisted, public]
+      job_id:
+        description: 'Stable DYPOL job ID'
+        required: false
+        default: ''
+      draft_run_id:
+        description: 'Producing run ID for publish'
+        required: false
+        default: ''
+      review_required:
+        description: 'Keep 1 to require review'
+        required: true
+        default: '1'
+      auto_publish:
+        description: 'Keep 0 to prevent automatic publishing'
+        required: true
+        default: '0'
+      title_override:
+        description: 'Optional reviewed title'
+        required: false
+        default: ''
+      description_override:
+        description: 'Optional reviewed description'
+        required: false
+        default: ''
 
 # A run takes far longer than the gap between a manual dispatch and the daily
 # schedule, so serialise them — two runs pushing to main race each other.
@@ -13,6 +54,8 @@ concurrency:
 
 jobs:
   build-and-deploy:
+    # Safety lock on the default branch. The phase-aware workflow lives on dypol-integration.
+    if: github.ref_name == 'dypol-integration'
     runs-on: ubuntu-latest
     permissions:
       contents: write
