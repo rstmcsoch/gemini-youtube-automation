@@ -178,6 +178,8 @@ jobs:
         id: production-run
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          DYPOL_GEMINI_IMAGE_ENABLED: ${{ vars.DYPOL_GEMINI_IMAGE_ENABLED || '0' }}
+          DYPOL_GEMINI_IMAGE_MODEL: ${{ vars.DYPOL_GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image' }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

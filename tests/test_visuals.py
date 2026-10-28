@@ -41,3 +41,30 @@ def test_visual_provider_failure_does_not_flag_concept(monkeypatch, tmp_path):
     }, tmp_path / "frame.png", set())
     assert manifest["provider"] == "gradient"
     assert review_required is False
+
+
+def test_gemini_image_is_opt_in(monkeypatch, tmp_path):
+    import src.visuals as visuals
+    called = []
+    monkeypatch.setattr(visuals.requests, "post", lambda *a, **k: called.append(True))
+    monkeypatch.delenv("DYPOL_GEMINI_IMAGE_ENABLED", raising=False)
+    assert visuals._gemini_image_generate("concept", tmp_path / "x.png") is None
+    assert called == []
+
+
+def test_gemini_zero_quota_429_short_circuits_later_calls(monkeypatch, tmp_path):
+    import src.visuals as visuals
+    class Response:
+        status_code = 429
+        text = '{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota limit: 0"}}'
+        def json(self):
+            return {"error": {"status": "RESOURCE_EXHAUSTED", "message": "quota limit: 0"}}
+    calls = []
+    monkeypatch.setattr(visuals.requests, "post", lambda *a, **k: (calls.append(True) or Response()))
+    monkeypatch.setenv("DYPOL_GEMINI_IMAGE_ENABLED", "1")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    visuals._GEMINI_IMAGE_DISABLED_FOR_QUOTA = False
+    assert visuals._gemini_image_generate("concept", tmp_path / "one.png") is None
+    assert visuals._GEMINI_IMAGE_DISABLED_FOR_QUOTA is True
+    assert visuals._gemini_image_generate("concept", tmp_path / "two.png") is None
+    assert len(calls) == 1

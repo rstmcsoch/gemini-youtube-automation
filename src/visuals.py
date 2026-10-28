@@ -180,6 +180,61 @@ def _cloudflare_generate(prompt, output_path):
         return None
 
 
+_GEMINI_IMAGE_DISABLED_FOR_QUOTA = False
+
+
+def _gemini_image_generate(prompt, output_path):
+    """Optional Gemini image generation; permanently short-circuit this process on zero-quota 429."""
+    global _GEMINI_IMAGE_DISABLED_FOR_QUOTA
+    if _GEMINI_IMAGE_DISABLED_FOR_QUOTA:
+        return None
+    if os.environ.get("DYPOL_GEMINI_IMAGE_ENABLED", "").strip().casefold() not in {"1", "true", "yes"}:
+        return None
+    key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    if not key:
+        return None
+    model = os.environ.get("DYPOL_GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image").strip()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{quote(model, safe='')}:generateContent"
+    try:
+        response = requests.post(
+            url, params={"key": key},
+            json={"contents": [{"parts": [{"text": f"Create a clean editorial illustration, no text or watermark: {prompt}"}]}],
+                  "generationConfig": {"responseModalities": ["IMAGE"]}},
+            timeout=(8, 60),
+        )
+        if response.status_code == 429:
+            body = ""
+            try:
+                body = json.dumps(response.json()).casefold()
+            except (ValueError, TypeError):
+                body = str(getattr(response, "text", "")).casefold()
+            if any(term in body for term in ("quota", "resource_exhausted", "billing", "limit: 0", "free_tier")):
+                _GEMINI_IMAGE_DISABLED_FOR_QUOTA = True
+                print("Gemini image generation disabled for this run: zero-quota 429; using fallback providers.")
+            return None
+        response.raise_for_status()
+        payload = response.json()
+        for candidate in payload.get("candidates", []):
+            for part in (candidate.get("content") or {}).get("parts", []):
+                inline = part.get("inlineData") or part.get("inline_data") or {}
+                encoded = inline.get("data")
+                if encoded:
+                    import base64
+                    output_path.write_bytes(base64.b64decode(encoded))
+                    with Image.open(output_path) as image:
+                        image.verify()
+                    return {
+                        "provider": "gemini_image", "source_url": url.split("?")[0],
+                        "asset_id": model, "license": "AI-generated; review applicable Google terms",
+                        "license_url": "https://ai.google.dev/gemini-api/terms",
+                        "retrieved_at": _now(),
+                        "sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+                    }
+        return None
+    except (requests.RequestException, ValueError, OSError):
+        return None
+
+
 def select_visual(intent, output_path, used_hashes=None):
     """Resolve one still using the intent-specific order; returns (manifest, review_required)."""
     used_hashes = used_hashes if used_hashes is not None else set()
@@ -222,6 +277,14 @@ def select_visual(intent, output_path, used_hashes=None):
                 output_path.unlink(missing_ok=True)
                 continue
     ai = _cloudflare_generate(query, output_path)
+    if ai:
+        digest = ai["sha256"]
+        if digest not in used_hashes:
+            used_hashes.add(digest)
+            return ai, False
+        output_path.unlink(missing_ok=True)
+    # Gemini is opt-in and runs only after licensed stock and FLUX have failed.
+    ai = _gemini_image_generate(query, output_path)
     if ai:
         digest = ai["sha256"]
         if digest not in used_hashes:
