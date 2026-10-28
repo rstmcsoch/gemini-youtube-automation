@@ -12,7 +12,6 @@ from src.generator import (
     text_to_speech,
     generate_visuals,
     create_video,
-    YOUR_NAME
 )
 from src.uploader import upload_to_youtube
 from dypol_control import (
@@ -66,7 +65,7 @@ def generate_lesson_assets(lesson):
     all_slides = [intro_slide] + lesson_content['long_form_slides'] + [outro_slide]
 
     slide_scripts = [
-        f"Hello and welcome to AI for Developers. I'm {YOUR_NAME} talking bot. Today’s lesson is titled {lesson['title']}.",
+        f"Hello and welcome to AI for Developers. Today’s lesson is titled {lesson['title']}.",
         *[s['content'] for s in lesson_content['long_form_slides']],
         "Thanks for watching! If you found this helpful, make sure to subscribe to our channel and hit the like button."
     ]
@@ -110,7 +109,7 @@ def generate_lesson_assets(lesson):
     short_slide_dir = OUTPUT_DIR / f"slides_short_{unique_id}"
     short_slide_content = {
         "title": "Quick Tip!",
-        "content": f"{lesson_content['short_form_highlight']}\n\n#AI for developers by chaitanya"
+        "content": f"{lesson_content['short_form_highlight']}\n\n#AIforDevelopers"
     }
     short_slide_path = generate_visuals(
         output_dir=short_slide_dir,
@@ -132,7 +131,7 @@ def generate_lesson_assets(lesson):
 
     hashtags = lesson_content.get("hashtags", "#AI #Developer #LearnAI")
     long_desc = (
-        f"Part of the 'AI for Developers' series by {YOUR_NAME}.\n\n"
+        f"Part of the AI for Developers series.\n\n"
         f"Today's Lesson: {lesson['title']}\n\n{hashtags}"
     )
     long_tags = "AI, Artificial Intelligence, Developer, Programming, Tutorial, " + lesson["title"].replace(" ", ", ")
