@@ -383,7 +383,8 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
         # Pexels is optional. The legacy Pexels path is retained only when the
         # tiered resolver did not produce a usable, rights-cleared image. If the API is paused or no key is configured, use our
         # built-in designed background instead of a flat black frame.
-        if background is None:\n            background = get_pexels_image(title, video_type)
+        # Do not fall through to legacy Pexels results because their per-asset
+        # rights metadata is not retained by the rights-checked visual resolver.
     except Exception as exc:
         print(f"⚠️ Stock image unavailable; using designed fallback background: {exc}")
 
