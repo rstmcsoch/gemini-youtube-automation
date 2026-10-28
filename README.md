@@ -5,18 +5,18 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ChaitanyaEswarRajeshJakki/gemini-youtube-automation/actions/workflows/main.yml">
-    <img src="https://github.com/ChaitanyaEswarRajeshJakki/gemini-youtube-automation/actions/workflows/main.yml/badge.svg" alt="Daily Pipeline">
+  <a href="https://github.com/rstmcsoch/gemini-youtube-automation/actions/workflows/main.yml">
+    <img src="https://github.com/rstmcsoch/gemini-youtube-automation/actions/workflows/main.yml/badge.svg" alt="Daily Pipeline">
   </a>
   <img src="https://img.shields.io/badge/python-3.11-blue?logo=python&logoColor=white" alt="Python 3.11">
   <img src="https://img.shields.io/badge/powered%20by-Gemini%202.5-orange?logo=google&logoColor=white" alt="Gemini 2.5">
-  <img src="https://img.shields.io/github/stars/ChaitanyaEswarRajeshJakki/gemini-youtube-automation?style=social" alt="Stars">
-  <img src="https://img.shields.io/github/last-commit/ChaitanyaEswarRajeshJakki/gemini-youtube-automation" alt="Last Commit">
+  <img src="https://img.shields.io/github/stars/rstmcsoch/gemini-youtube-automation?style=social" alt="Stars">
+  <img src="https://img.shields.io/github/last-commit/rstmcsoch/gemini-youtube-automation" alt="Last Commit">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
 <p align="center">
-  <a href="https://www.youtube.com/@ChaitanyaEswarRajeshJakki/videos">📺 Watch the Generated Videos on YouTube</a>
+  <a href="https://www.youtube.com/@dypolsignal/videos">📺 Watch the Generated Videos on YouTube</a>
 </p>
 
 ---
@@ -25,7 +25,7 @@
 
 ![Demo — AI-generated lesson video](images/demo.gif)
 
-[![Watch on YouTube](https://img.shields.io/badge/▶%20Watch%20on%20YouTube-red?logo=youtube&logoColor=white&style=for-the-badge)](https://www.youtube.com/@ChaitanyaEswarRajeshJakki/videos)
+[![Watch on YouTube](https://img.shields.io/badge/▶%20Watch%20on%20YouTube-red?logo=youtube&logoColor=white&style=for-the-badge)](https://www.youtube.com/@dypolsignal/videos)
 
 ---
 
@@ -118,7 +118,7 @@ GitHub Actions Scheduler (7 AM UTC)
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/ChaitanyaEswarRajeshJakki/gemini-youtube-automation.git
+git clone https://github.com/rstmcsoch/gemini-youtube-automation.git
 cd gemini-youtube-automation
 ```
 
@@ -171,7 +171,7 @@ Track progress live in [content_plan.json](content_plan.json).
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=ChaitanyaEswarRajeshJakki/gemini-youtube-automation&type=Date)](https://star-history.com/#ChaitanyaEswarRajeshJakki/gemini-youtube-automation&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=rstmcsoch/gemini-youtube-automation&type=Date)](https://star-history.com/#rstmcsoch/gemini-youtube-automation&Date)
 
 ---
 
