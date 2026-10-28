@@ -15,6 +15,10 @@ on:
         description: 'Optional lesson topic'
         required: false
         default: ''
+      language:
+        description: 'Voice/caption language sent by the DYPOL console (Engine A narrates in English; accepted for payload compatibility)'
+        required: false
+        default: 'en'
       privacy:
         description: 'YouTube visibility; keep private for initial testing'
         required: true
