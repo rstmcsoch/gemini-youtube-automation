@@ -1,0 +1,119 @@
+name: DYPOL Engine A OAuth credential validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_validation:
+        description: "Validate the configured OAuth secrets by refreshing an access token; this does not upload anything"
+        required: true
+        type: choice
+        options:
+          - "no"
+          - "yes"
+        default: "no"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-oauth:
+    if: github.ref_name == 'dypol-integration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Confirm validation only
+        env:
+          CONFIRM_VALIDATION: ${{ inputs.confirm_validation }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRM_VALIDATION" != "yes" ]; then
+            echo "Validation was not confirmed. No OAuth request was made."
+            exit 1
+          fi
+          echo "Validation-only mode confirmed. No YouTube upload will be attempted."
+
+      - name: Validate secrets and refresh access token without printing credentials
+        env:
+          YOUTUBE_CLIENT_SECRETS_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRETS_JSON }}
+          YOUTUBE_CREDENTIALS_JSON: ${{ secrets.YOUTUBE_CREDENTIALS_JSON }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          REQUIRED_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+
+          client_raw = os.environ.get("YOUTUBE_CLIENT_SECRETS_JSON", "")
+          creds_raw = os.environ.get("YOUTUBE_CREDENTIALS_JSON", "")
+          if not client_raw or not creds_raw:
+              raise SystemExit("FAIL: one or both required GitHub Actions secrets are missing.")
+
+          try:
+              client_doc = json.loads(client_raw)
+              creds = json.loads(creds_raw)
+          except (json.JSONDecodeError, TypeError):
+              raise SystemExit("FAIL: a configured OAuth secret is not valid JSON.")
+
+          client = client_doc.get("installed") or client_doc.get("web")
+          if not isinstance(client, dict):
+              raise SystemExit("FAIL: client JSON has neither installed nor web OAuth configuration.")
+
+          client_id = client.get("client_id")
+          client_secret = client.get("client_secret")
+          token_uri = client.get("token_uri") or "https://oauth2.googleapis.com/token"
+
+          required = ("client_id", "client_secret", "refresh_token", "token_uri")
+          missing = [key for key in required if not creds.get(key)]
+          if missing:
+              raise SystemExit("FAIL: credentials JSON is missing required fields: " + ", ".join(missing))
+
+          if creds.get("client_id") != client_id:
+              raise SystemExit("FAIL: client ID in the two secrets does not match.")
+          if creds.get("client_secret") != client_secret:
+              raise SystemExit("FAIL: client secret in the two secrets does not match.")
+          if creds.get("token_uri") != token_uri:
+              raise SystemExit("FAIL: token endpoint in the two secrets does not match.")
+          scopes = creds.get("scopes") or []
+          if REQUIRED_SCOPE not in scopes:
+              raise SystemExit("FAIL: credentials do not include the required youtube.upload scope.")
+
+          form = urllib.parse.urlencode({
+              "client_id": client_id,
+              "client_secret": client_secret,
+              "refresh_token": creds["refresh_token"],
+              "grant_type": "refresh_token",
+          }).encode("utf-8")
+          request = urllib.request.Request(
+              token_uri,
+              data=form,
+              headers={"Content-Type": "application/x-www-form-urlencoded"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=25) as response:
+                  token_response = json.loads(response.read().decode("utf-8"))
+          except urllib.error.HTTPError as exc:
+              # Never print the response body: keep token and credential details out of logs.
+              raise SystemExit(
+                  f"FAIL: Google token endpoint rejected the refresh request (HTTP {exc.code}). "
+                  "Check the OAuth client/refresh token and app status in Google Cloud."
+              )
+          except (urllib.error.URLError, TimeoutError):
+              raise SystemExit("FAIL: could not reach Google's OAuth token endpoint.")
+
+          if not token_response.get("access_token"):
+              raise SystemExit("FAIL: Google returned no access token.")
+          if token_response.get("token_type", "").lower() != "bearer":
+              raise SystemExit("FAIL: Google returned an unexpected token type.")
+          print("PASS: both GitHub secrets are present and valid JSON.")
+          print("PASS: OAuth client details match across both secrets.")
+          print("PASS: required youtube.upload scope is present.")
+          print("PASS: Google accepted the refresh token and returned an access token.")
+          print("PASS: no token, client secret, refresh token, or API credential was printed.")
+          print("NOTE: this validation did not call YouTube Data API and did not upload a video.")
+          PY
