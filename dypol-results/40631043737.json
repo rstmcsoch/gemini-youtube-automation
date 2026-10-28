@@ -1,0 +1,26 @@
+{
+  "job_id": "40630458056",
+  "run_id": "40631043737",
+  "status": "uploaded",
+  "visibility": "private",
+  "videos": [
+    {
+      "kind": "long",
+      "youtube_id": "OICzoAd8kTk",
+      "youtube_url": "https://youtu.be/OICzoAd8kTk",
+      "title": "How AI agents automate video creation",
+      "visibility": "private"
+    },
+    {
+      "kind": "short",
+      "youtube_id": "a6XqcycG60g",
+      "youtube_url": "https://youtu.be/a6XqcycG60g",
+      "title": "Learn how AI agents build entire videos from scratch by orchestrating scriptwriting, voice #Shorts",
+      "visibility": "private"
+    }
+  ],
+  "youtube_id": "OICzoAd8kTk",
+  "youtube_url": "https://youtu.be/OICzoAd8kTk",
+  "video_count": 2,
+  "recorded_at": "2026-10-28T04:13:39.945746+00:00"
+}
