@@ -68,7 +68,6 @@ ASSETS_PATH = Path("assets")
 FONT_FILE = ASSETS_PATH / "fonts/arial.ttf"
 BACKGROUND_MUSIC_PATH = ASSETS_PATH / "music/bg_music.mp3"
 FALLBACK_THUMBNAIL_FONT = ImageFont.load_default()
-YOUR_NAME = "Chaitanya"
 
 # Google's TTS endpoint throttles bursts from shared CI IPs. When it does, it answers
 # 200 OK with no audio stream, which gTTS surfaces as "Probable cause: Unknown".
@@ -166,7 +165,8 @@ def generate_curriculum(previous_titles=None):
             history = f"The following lessons have already been created:\n{formatted}\n\nPlease continue from where this series left off.\n"
 
         prompt = f"""
-        You are an expert AI educator. Generate a curriculum for a YouTube series called 'AI for Developers by {YOUR_NAME}'.
+        You are an expert AI educator. Generate a curriculum for a YouTube series called 'AI for Developers'.
+        Do not include any person's name, presenter name, creator attribution, or personal credit in titles, descriptions, tags, slide text, or narration.
         {history}
         The style must be: 'Assume the viewer is a beginner or non-technical person starting their journey into AI as a developer.
         Use simple real-world analogies, relatable examples, and then connect to technical concepts.'
@@ -193,7 +193,8 @@ def generate_lesson_content(lesson_title):
     try:
         client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
         prompt = f"""
-        You are creating a lesson for the 'AI for Developers by {YOUR_NAME}' series. The topic is '{lesson_title}'.
+        You are creating a lesson for the 'AI for Developers' series. The topic is '{lesson_title}'.
+        Do not include any person's name, presenter name, creator attribution, or personal credit in titles, descriptions, tags, slide text, or narration.
         The style is: Assume the viewer is a beginner developer or non-tech person who wants to learn AI from scratch.
         Use analogies and clear, simple language. Each concept must be explained from a developer's perspective, assuming no prior AI or ML knowledge.
 
@@ -492,7 +493,7 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
         footer_y = height - footer_height
         draw.rectangle((0, footer_y, width, height), fill=(10, 20, 39))
         draw.rectangle((0, footer_y, width, footer_y + max(4, int(height * 0.004))), fill=accent)
-        footer_text = "AI for Developers  •  by Chaitanya"
+        footer_text = "AI for Developers"
         footer_font = _load_visual_font(max(18, int(min(width, height) * 0.022)))
         draw.text((int(width * 0.035), footer_y + int(footer_height * 0.30)), footer_text, font=footer_font, fill=(176, 193, 215))
         if total_slides > 0:
