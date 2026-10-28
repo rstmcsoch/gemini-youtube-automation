@@ -1,0 +1,26 @@
+{
+  "job_id": "hark-anthropic-ipo-a1",
+  "run_id": "40653896991",
+  "status": "uploaded",
+  "visibility": "private",
+  "videos": [
+    {
+      "kind": "long",
+      "youtube_id": "X9QsRf69pNY",
+      "youtube_url": "https://youtu.be/X9QsRf69pNY",
+      "title": "Anthropic files for what could be the biggest tech IPO ever",
+      "visibility": "private"
+    },
+    {
+      "kind": "short",
+      "youtube_id": "5KOG_C_BDH4",
+      "youtube_url": "https://youtu.be/5KOG_C_BDH4",
+      "title": "AI powerhouse Anthropic is preparing for a historic IPO that could change tech forever. Fo #Shorts",
+      "visibility": "private"
+    }
+  ],
+  "youtube_id": "X9QsRf69pNY",
+  "youtube_url": "https://youtu.be/X9QsRf69pNY",
+  "video_count": 2,
+  "recorded_at": "2026-10-28T08:02:41.506739+00:00"
+}
