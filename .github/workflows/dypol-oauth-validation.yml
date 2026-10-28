@@ -1,6 +1,11 @@
 name: DYPOL Engine A OAuth credential validation
 
 on:
+  push:
+    branches:
+      - dypol-integration
+    paths:
+      - ".github/workflows/dypol-oauth-validation.yml"
   workflow_dispatch:
     inputs:
       confirm_validation:
@@ -23,10 +28,11 @@ jobs:
     steps:
       - name: Confirm validation only
         env:
+          EVENT_NAME: ${{ github.event_name }}
           CONFIRM_VALIDATION: ${{ inputs.confirm_validation }}
         run: |
           set -euo pipefail
-          if [ "$CONFIRM_VALIDATION" != "yes" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$CONFIRM_VALIDATION" != "yes" ]; then
             echo "Validation was not confirmed. No OAuth request was made."
             exit 1
           fi
