@@ -379,15 +379,6 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
                 print("::warning::An essential news/product visual could not be rights-cleared; review required.")
         except Exception as exc:
             print(f"⚠️ Rights-checked visual selection unavailable; using designed fallback: {exc}")
-    try:
-        # Pexels is optional. The legacy Pexels path is retained only when the
-        # tiered resolver did not produce a usable, rights-cleared image. If the API is paused or no key is configured, use our
-        # built-in designed background instead of a flat black frame.
-        # Do not fall through to legacy Pexels results because their per-asset
-        # rights metadata is not retained by the rights-checked visual resolver.
-    except Exception as exc:
-        print(f"⚠️ Stock image unavailable; using designed fallback background: {exc}")
-
     if background is not None:
         try:
             background = background.convert("RGBA").resize((width, height)).filter(ImageFilter.GaussianBlur(12))
