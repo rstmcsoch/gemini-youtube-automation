@@ -166,6 +166,16 @@
         }
       ],
       "youtube_short_id": "a6XqcycG60g"
+    },
+    {
+      "chapter": "Ad-hoc",
+      "part": "Topic input",
+      "title": "Anthropic files for what could be the biggest tech IPO ever",
+      "topic": "Anthropic files for what could be the biggest tech IPO ever",
+      "status": "draft_ready",
+      "youtube_id": null,
+      "origin": "dypol-topic-override",
+      "uploads": []
     }
   ]
 }
