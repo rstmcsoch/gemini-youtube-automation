@@ -346,10 +346,44 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
     content = str((slide_content or {}).get("content", "") or "")
 
     background = None
+    visual_manifest = None
+    visual_review_required = False
+    if not is_thumbnail and slide_content:
+        try:
+            from src.visuals import select_visual
+            import re
+            text_for_intent = f"{title} {content}"
+            terms = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9.-]{2,}", text_for_intent)][:12]
+            lowered = text_for_intent.casefold()
+            kind = "product" if any(t in lowered for t in ("iphone", "pixel phone", "galaxy", "product launch", "product review")) else (
+                "news_event" if any(t in lowered for t in ("breaking news", "announced today", "this week", "latest news", "recently announced")) else (
+                    "data" if any(t in lowered for t in ("statistics", "percentage", "survey", "data shows", "chart")) else "concept"))
+            intent = {"type": kind, "entities": [], "keywords": terms,
+                      "segment": int(slide_number or 0), "real_image_essential": kind in {"news_event", "product"}}
+            asset_path = output_dir / f"visual_asset_{slide_number or 0}.png"
+            visual_manifest, visual_review_required = select_visual(intent, asset_path, set())
+            manifest_path = output_dir / "visual_manifest.json"
+            try:
+                prior = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else []
+            except (OSError, ValueError):
+                prior = []
+            prior.append({"segment": int(slide_number or 0), "intent": intent,
+                          "review_required": visual_review_required, "asset": visual_manifest})
+            manifest_path.write_text(json.dumps(prior, indent=2), encoding="utf-8")
+            if visual_manifest.get("provider") != "gradient" and asset_path.exists():
+                background = Image.open(asset_path).convert("RGBA")
+            if visual_review_required:
+                (output_dir / "REVIEW_REQUIRED.txt").write_text(
+                    "An essential news/product visual could not be rights-cleared. Review before publishing.\n",
+                    encoding="utf-8")
+                print("::warning::An essential news/product visual could not be rights-cleared; review required.")
+        except Exception as exc:
+            print(f"⚠️ Rights-checked visual selection unavailable; using designed fallback: {exc}")
     try:
-        # Pexels is optional. If the API is paused or no key is configured, use our
+        # Pexels is optional. The legacy Pexels path is retained only when the
+        # tiered resolver did not produce a usable, rights-cleared image. If the API is paused or no key is configured, use our
         # built-in designed background instead of a flat black frame.
-        background = get_pexels_image(title, video_type)
+        if background is None:\n            background = get_pexels_image(title, video_type)
     except Exception as exc:
         print(f"⚠️ Stock image unavailable; using designed fallback background: {exc}")
 
