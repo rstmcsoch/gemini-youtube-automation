@@ -32,7 +32,7 @@ def test_visual_provider_failure_uses_gradient_and_flags_essential_news(monkeypa
 
 
 def test_visual_provider_failure_does_not_flag_concept(monkeypatch, tmp_path):
-    import verticals.visuals as visuals
+    import src.visuals as visuals
     monkeypatch.setattr(visuals, "_pixabay_candidates", lambda query: [])
     monkeypatch.setattr(visuals, "_cloudflare_generate", lambda prompt, path: None)
     manifest, review_required = select_visual({

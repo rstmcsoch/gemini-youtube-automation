@@ -248,6 +248,13 @@ def find_candidate(candidate_root: Path, job_id: str) -> dict:
         )
     with open(cand_path, "r", encoding="utf-8") as fh:
         cand = json.load(fh)
+    # Fail closed when essential visual rights are unresolved. The approval
+    # flag must be set only after review of this exact saved candidate.
+    if cand.get("review_required") and os.environ.get("DYPOL_VISUAL_REVIEW_APPROVED", "").strip() != "1":
+        raise PolicyViolation(
+            f"Candidate {job_id} requires visual-rights review before upload. "
+            "Review its saved visual_manifest and explicitly set DYPOL_VISUAL_REVIEW_APPROVED=1."
+        )
     for asset in cand.get("assets", []):
         for key in ("path",):
             if not asset.get(key) or not Path(asset[key]).exists():

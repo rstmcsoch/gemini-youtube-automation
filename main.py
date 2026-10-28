@@ -145,9 +145,25 @@ def generate_lesson_assets(lesson):
 
     # Generation is deliberately separate from upload. The candidate and media
     # are saved first; the publish phase can only upload this exact candidate.
+    visual_manifests = []
+    visual_review_required = False
+    for visual_dir in (slide_dir, short_slide_dir):
+        manifest_path = visual_dir / "visual_manifest.json"
+        if manifest_path.exists():
+            try:
+                entries = json.loads(manifest_path.read_text(encoding="utf-8"))
+                entries = entries if isinstance(entries, list) else [entries]
+                visual_manifests.extend(entries)
+                visual_review_required = visual_review_required or any(
+                    bool(item.get("review_required")) for item in entries
+                )
+            except (OSError, ValueError):
+                visual_review_required = True
     return {
         "job_id": os.environ.get("DYPOL_JOB_ID", ""),
         "lesson_title": lesson["title"],
+        "review_required": visual_review_required,
+        "visual_manifest": visual_manifests,
         "assets": [
             {
                 "kind": "long",
