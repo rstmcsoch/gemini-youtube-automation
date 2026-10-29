@@ -215,6 +215,7 @@ def upload_candidate_asset(asset, policy):
         asset.get("tags", ""),
         asset.get("thumb_path"),
         kind=kind,
+        visual_manifest=asset.get("visual_manifest"),
     )
 
 

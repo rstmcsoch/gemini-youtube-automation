@@ -9,7 +9,9 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-from dypol_control import build_insert_body, verify_insert_body, VALID_VISIBILITY
+from dypol_control import (
+    build_insert_body, verify_insert_body, resolve_contains_synthetic_media, VALID_VISIBILITY,
+)
 
 CLIENT_SECRETS_FILE = Path("client_secrets.json")
 CREDENTIALS_FILE = Path("credentials.json")
@@ -55,16 +57,24 @@ def get_authenticated_service():
     return build("youtube", "v3", credentials=credentials)
 
 
-def upload_to_youtube(video_path, title, description, tags, thumbnail_path=None, kind="video"):
-    """Upload one video and return its ID, URL, title, visibility and kind."""
+def upload_to_youtube(video_path, title, description, tags, thumbnail_path=None, kind="video",
+                      visual_manifest=None):
+    """Upload one video and return its ID, URL, title, visibility and kind.
+
+    ``visual_manifest`` is this video's visual manifest; when it includes an
+    AI-generated asset (FLUX / Cloudflare / AI-generated) the upload declares
+    status.containsSyntheticMedia=True, unless YOUTUBE_CONTAINS_SYNTHETIC_MEDIA
+    (auto|true|false, default auto) forces the value."""
     video_path = Path(video_path)
     if not video_path.is_file():
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
     safe_title = sanitize_title(title)
     visibility = get_privacy_status()
-    body = build_insert_body(safe_title, description, tags, visibility)
+    contains_synthetic_media = resolve_contains_synthetic_media(visual_manifest)
+    body = build_insert_body(safe_title, description, tags, visibility, contains_synthetic_media)
     verify_insert_body(body, visibility)
+    print(f"containsSyntheticMedia={contains_synthetic_media} ({kind})")
     youtube = get_authenticated_service()
     media = MediaFileUpload(str(video_path), chunksize=-1, resumable=True)
     request = youtube.videos().insert(part=",".join(body.keys()), body=body, media_body=media)
@@ -99,4 +109,5 @@ def upload_to_youtube(video_path, title, description, tags, thumbnail_path=None,
         "visibility": visibility,
         "kind": kind,
         "thumbnail_uploaded": thumbnail_uploaded,
+        "contains_synthetic_media": contains_synthetic_media,
     }

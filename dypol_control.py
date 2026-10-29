@@ -135,7 +135,93 @@ def resolve_policy(env: dict | os._Environ | None = None) -> PhasePolicy:
 # videos.insert body: build + verify
 # --------------------------------------------------------------------------
 
-def build_insert_body(title: str, description: str, tags, visibility: str = "private") -> dict:
+# --------------------------------------------------------------------------
+# YouTube altered/synthetic-content disclosure (status.containsSyntheticMedia)
+# --------------------------------------------------------------------------
+
+SYNTHETIC_MEDIA_ENV = "YOUTUBE_CONTAINS_SYNTHETIC_MEDIA"
+SYNTHETIC_MEDIA_MODES = ("auto", "true", "false")
+# Lower-cased substrings that mark a manifest asset as AI-generated. Matched
+# against provider / asset_id / license, so FLUX on Cloudflare Workers AI
+# ("cloudflare_workers_ai", "cloudflare_workers_ai_flux", "flux-1-schnell"),
+# Gemini images (license "AI-generated; ...") and any provider explicitly
+# tagged "ai-generated" are all detected.
+AI_ASSET_MARKERS = ("flux", "cloudflare", "ai-generated", "ai_generated", "ai generated", "gemini_image")
+
+
+def _is_ai_asset(entry: dict) -> bool:
+    for key in ("provider", "asset_id", "license"):
+        value = str(entry.get(key) or "").strip().lower()
+        if value and any(marker in value for marker in AI_ASSET_MARKERS):
+            return True
+    return False
+
+
+def manifest_has_ai_asset(manifest) -> bool:
+    """True when any entry of a visual manifest (any nesting: list of entries,
+    ``{"assets": [...]}``, ``{"asset": {...}}`` or ``{"clip": {...}}``) is an
+    AI-generated asset."""
+    stack = [manifest]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            if _is_ai_asset(item):
+                return True
+            stack.extend(v for v in item.values() if isinstance(v, (list, dict)))
+    return False
+
+
+def synthetic_media_mode(env: dict | os._Environ | None = None) -> str:
+    env = os.environ if env is None else env
+    mode = str(env.get(SYNTHETIC_MEDIA_ENV, "auto") or "auto").strip().lower()
+    if mode in ("1", "yes", "on"):
+        mode = "true"
+    elif mode in ("0", "no", "off"):
+        mode = "false"
+    if mode not in SYNTHETIC_MEDIA_MODES:
+        print(f"WARNING: invalid {SYNTHETIC_MEDIA_ENV}={mode!r}; using auto.")
+        mode = "auto"
+    return mode
+
+
+def resolve_contains_synthetic_media(manifest, env: dict | os._Environ | None = None) -> bool:
+    """Decide status.containsSyntheticMedia for one upload.
+
+    YOUTUBE_CONTAINS_SYNTHETIC_MEDIA=true/false forces the value; auto (the
+    default) sets it True only when the video's visual manifest includes an
+    AI-generated asset."""
+    mode = synthetic_media_mode(env)
+    if mode == "true":
+        return True
+    if mode == "false":
+        return False
+    return manifest_has_ai_asset(manifest or [])
+
+
+def asset_visual_manifest(candidate: dict, asset: dict) -> list:
+    """The visual-manifest entries for one candidate asset (long or short).
+
+    Entries are tagged with ``video`` ('long' / 'short'); when an asset has no
+    tagged entries, fall back to the whole candidate manifest so a disclosure
+    is never silently dropped."""
+    if isinstance(asset.get("visual_manifest"), list):
+        return asset["visual_manifest"]
+    entries = candidate.get("visual_manifest") or []
+    entries = entries if isinstance(entries, list) else [entries]
+    kind = asset.get("kind")
+    tagged = [e for e in entries if isinstance(e, dict) and e.get("video") == kind]
+    return tagged or entries
+
+
+def build_insert_body(
+    title: str,
+    description: str,
+    tags,
+    visibility: str = "private",
+    contains_synthetic_media: bool = False,
+) -> dict:
     """Build the exact request body for youtube.videos().insert."""
     if visibility not in VALID_VISIBILITY:
         raise PolicyViolation(f"Invalid visibility {visibility!r}")
@@ -153,6 +239,7 @@ def build_insert_body(title: str, description: str, tags, visibility: str = "pri
         "status": {
             "privacyStatus": visibility,
             "selfDeclaredMadeForKids": False,
+            "containsSyntheticMedia": bool(contains_synthetic_media),
         },
     }
 
@@ -403,7 +490,9 @@ def execute_phase(
                 )
                 verify_insert_body(body, policy.visibility)  # refuse wrong visibility
                 try:
-                    record = upload_fn(asset, policy)
+                    record = upload_fn(
+                        {**asset, "visual_manifest": asset_visual_manifest(candidate, asset)}, policy
+                    )
                 except Exception as e:  # persist what succeeded, then fail loudly
                     error = e
                     break
@@ -440,7 +529,9 @@ def execute_phase(
             )
             verify_insert_body(body, policy.visibility)
             try:
-                record = upload_fn(asset, policy)
+                record = upload_fn(
+                    {**asset, "visual_manifest": asset_visual_manifest(candidate, asset)}, policy
+                )
             except Exception as e:
                 error = e
                 break
