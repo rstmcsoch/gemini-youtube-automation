@@ -202,6 +202,16 @@
       "youtube_id": null,
       "origin": "dypol-topic-override",
       "uploads": []
+    },
+    {
+      "chapter": "Ad-hoc",
+      "part": "Google DeepMind releases a new AI model for cybe",
+      "title": "Google DeepMind releases a new AI model for cybersecurity defense: what it means for security teams",
+      "topic": "Google DeepMind releases a new AI model for cybersecurity defense: what it means for security teams",
+      "status": "draft_ready",
+      "youtube_id": null,
+      "origin": "dypol-topic-override",
+      "uploads": []
     }
   ]
 }
