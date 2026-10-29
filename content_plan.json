@@ -192,6 +192,16 @@
         }
       ],
       "youtube_short_id": "5KOG_C_BDH4"
+    },
+    {
+      "chapter": "Ad-hoc",
+      "part": "Topic input",
+      "title": "OpenAI reportedly plans to buy Google's TPU AI chips: what it means for Nvidia",
+      "topic": "OpenAI reportedly plans to buy Google's TPU AI chips: what it means for Nvidia",
+      "status": "draft_ready",
+      "youtube_id": null,
+      "origin": "dypol-topic-override",
+      "uploads": []
     }
   ]
 }
