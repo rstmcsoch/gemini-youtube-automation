@@ -353,13 +353,35 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
             from src.visuals import select_visual
             import re
             text_for_intent = f"{title} {content}"
-            terms = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9.-]{2,}", text_for_intent)][:12]
+            _stop = {"the", "and", "for", "with", "that", "this", "what", "when", "why", "how", "are", "was",
+                     "will", "can", "its", "it's", "you", "your", "our", "their", "they", "from", "into", "about",
+                     "just", "more", "most", "than", "then", "there", "here", "have", "has", "had", "been", "being",
+                     "today", "means", "mean", "reportedly", "plans", "chapter", "part", "lesson", "think", "look",
+                     "understand", "simple", "beneath", "headlines", "modern", "new", "now", "all", "one", "also",
+                     "like", "some", "very", "really", "these", "those", "which", "who", "does", "not", "but"}
+            words = re.findall(r"[A-Za-z][A-Za-z0-9.+-]{1,}", text_for_intent)
+            terms, seen = [], set()
+            for w in words:
+                k = w.casefold().strip(".-")
+                if len(k) < 3 and not w.isupper():
+                    continue
+                if k in _stop or k in seen:
+                    continue
+                seen.add(k)
+                terms.append(w.strip(".-"))
+            # Entities: brand/proper tokens (OpenAI, Nvidia, TPU) — capitalised, not sentence words.
+            entities = [w for w in terms if (w[0].isupper() and any(c.isupper() for c in w[1:])) or w.isupper()
+                        or w.casefold() in {"google", "nvidia", "openai", "microsoft", "apple", "meta", "amazon",
+                                            "anthropic", "gemini", "deepmind", "tesla", "samsung", "intel", "amd"}][:3]
+            terms = terms[:8]
             lowered = text_for_intent.casefold()
             kind = "product" if any(t in lowered for t in ("iphone", "pixel phone", "galaxy", "product launch", "product review")) else (
-                "news_event" if any(t in lowered for t in ("breaking news", "announced today", "this week", "latest news", "recently announced")) else (
+                "news_event" if any(t in lowered for t in ("breaking news", "announced", "announces", "launches", "launched",
+                                                        "unveils", "reportedly", "plans to buy", "acquires", "this week",
+                                                        "latest news")) else (
                     "data" if any(t in lowered for t in ("statistics", "percentage", "survey", "data shows", "chart")) else "concept"))
-            intent = {"type": kind, "entities": [], "keywords": terms,
-                      "segment": int(slide_number or 0), "real_image_essential": kind in {"news_event", "product"}}
+            intent = {"type": kind, "entities": entities, "keywords": terms,
+                      "segment": int(slide_number or 0), "real_image_essential": kind == "product"}
             asset_path = output_dir / f"visual_asset_{slide_number or 0}.png"
             visual_manifest, visual_review_required = select_visual(intent, asset_path, set())
             manifest_path = output_dir / "visual_manifest.json"

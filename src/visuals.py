@@ -239,7 +239,10 @@ def select_visual(intent, output_path, used_hashes=None):
     """Resolve one still using the intent-specific order; returns (manifest, review_required)."""
     used_hashes = used_hashes if used_hashes is not None else set()
     kind = intent.get("type", "concept")
-    query = " ".join([*(intent.get("entities") or []), *(intent.get("keywords") or [])]).strip()
+    # Stock/archive search works best with a short query: up to 2 entities + 3 keywords.
+    ents = list(intent.get("entities") or [])[:2]
+    kws = [k for k in (intent.get("keywords") or []) if k not in ents][:3]
+    query = " ".join([*ents, *kws]).strip()[:100]
     query = query or str(intent.get("prompt", "technology concept"))
     providers = ["wikimedia", "pixabay"] if kind in {"news_event", "product"} else ["pixabay"]
     candidates = []

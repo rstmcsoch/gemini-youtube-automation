@@ -217,7 +217,7 @@ def select_next_lesson(plan: dict, topic: str | None = None):
                 return lesson
         ad_hoc = {
             "chapter": "Ad-hoc",
-            "part": "Topic input",
+            "part": topic.strip()[:48],
             "title": topic.strip(),
             "topic": topic.strip(),
             "status": "pending",
