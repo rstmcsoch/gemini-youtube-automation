@@ -403,8 +403,8 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
             print(f"⚠️ Rights-checked visual selection unavailable; using designed fallback: {exc}")
     if background is not None:
         try:
-            background = background.convert("RGBA").resize((width, height)).filter(ImageFilter.GaussianBlur(12))
-            shade = Image.new("RGBA", (width, height), (5, 10, 24, 172))
+            background = background.convert("RGBA").resize((width, height)).filter(ImageFilter.GaussianBlur(2))
+            shade = Image.new("RGBA", (width, height), (5, 10, 24, 96))
             final_bg = Image.alpha_composite(background, shade).convert("RGB")
         except Exception:
             final_bg = _make_gradient_background(width, height, title)
@@ -507,13 +507,17 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
         content_bottom = height - footer_height - int(height * 0.055)
         panel_left = int(width * 0.07)
         panel_right = width - panel_left
-        _safe_rounded_rectangle(draw,
+        # Translucent text panel so the rights-checked visual stays visible behind it.
+        panel_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        _safe_rounded_rectangle(ImageDraw.Draw(panel_layer),
             (panel_left, content_top, panel_right, content_bottom),
             radius=max(12, int(min(width, height) * 0.025)),
-            fill=(7, 14, 30),
-            outline=(33, 63, 98),
+            fill=(7, 14, 30, 170 if background is not None else 255),
+            outline=(33, 63, 98, 255),
             width=max(2, int(min(width, height) * 0.0018)),
         )
+        final_bg = Image.alpha_composite(final_bg.convert("RGBA"), panel_layer).convert("RGB")
+        draw = ImageDraw.Draw(final_bg)
         is_special_slide = len(content.split()) < 10
         body_start = 64 if is_special_slide and is_long else 68 if is_special_slide else 46 if is_long else 50
         body_min = 34 if is_long else 36

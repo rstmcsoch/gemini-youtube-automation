@@ -60,7 +60,9 @@ def generate_lesson_assets(lesson):
 
     print("\n--- Producing Long-Form Video ---")
 
-    intro_slide = {"title": lesson['title'], "content": f"Chapter {lesson['chapter']} | Part {lesson['part']}"}
+    intro_slide = {"title": lesson['title'], "content": (
+        "AI tech news explained" if lesson.get('origin') == 'dypol-topic-override'
+        else f"Chapter {lesson['chapter']} | Part {lesson['part']}")}
     outro_slide = {"title": "Thanks for Watching!", "content": "Like, Share & Subscribe for more daily AI content!\n#AIforDevelopers"}
     all_slides = [intro_slide] + lesson_content['long_form_slides'] + [outro_slide]
 
