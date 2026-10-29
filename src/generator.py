@@ -28,6 +28,8 @@ def _generate_text_with_fallback(client, prompt, task_name="text generation"):
     ]
     # Keep order stable and avoid calling the same model twice.
     model_names = list(dict.fromkeys(model_names))
+    # One more attempt on the primary after the fallbacks (network blips are common).
+    model_names.append(model_names[0])
     last_error = None
 
     for index, model_name in enumerate(model_names):
@@ -48,7 +50,10 @@ def _generate_text_with_fallback(client, prompt, task_name="text generation"):
                     "429", "500", "502", "503", "504",
                     "UNAVAILABLE", "RESOURCE_EXHAUSTED",
                     "INTERNAL SERVER ERROR", "TIMED OUT", "TIMEOUT",
+                    "DISCONNECTED", "CONNECTION", "NETWORK", "RESET BY PEER",
                 ))
+                or type(exc).__name__ in ("RemoteProtocolError", "ConnectError", "ReadTimeout",
+                                          "ConnectTimeout", "ReadError", "ConnectionError")
             )
             if not transient or index == len(model_names) - 1:
                 raise
