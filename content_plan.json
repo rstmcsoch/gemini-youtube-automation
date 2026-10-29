@@ -212,6 +212,16 @@
       "youtube_id": null,
       "origin": "dypol-topic-override",
       "uploads": []
+    },
+    {
+      "chapter": "Ad-hoc",
+      "part": "How AI is changing cybersecurity defense",
+      "title": "How AI is changing cybersecurity defense",
+      "topic": "How AI is changing cybersecurity defense",
+      "status": "draft_ready",
+      "youtube_id": null,
+      "origin": "dypol-topic-override",
+      "uploads": []
     }
   ]
 }
