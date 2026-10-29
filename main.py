@@ -57,20 +57,38 @@ def generate_lesson_assets(lesson):
     unique_id = f"{datetime.datetime.now().strftime('%Y%m%d')}_{chapter_safe}_{part_safe}"
 
     lesson_content = generate_lesson_content(lesson['title'])
+    from src import storyboard as sb
+    from src.production import produce_long, produce_short, fit_short_audio
+    from src.visuals import gather_visuals
 
     print("\n--- Producing Long-Form Video ---")
 
-    intro_slide = {"title": lesson['title'], "content": (
-        "AI tech news explained" if lesson.get('origin') == 'dypol-topic-override'
-        else f"Chapter {lesson['chapter']} | Part {lesson['part']}")}
-    outro_slide = {"title": "Thanks for Watching!", "content": "Like, Share & Subscribe for more daily AI content!\n#AIforDevelopers"}
-    all_slides = [intro_slide] + lesson_content['long_form_slides'] + [outro_slide]
+    body_slides = [sb.normalize_slide(s, lesson['title']) for s in lesson_content['long_form_slides']]
+    lesson_terms = [lesson['title']] + [q for s in body_slides for q in s["visual_queries"]]
+    intro_queries = (body_slides[0]["visual_queries"] if body_slides else []) + \
+        (body_slides[1]["visual_queries"][:1] if len(body_slides) > 1 else [])
+    intro_slide = {
+        "title": lesson['title'], "bullets": [], "content": "",
+        "kicker": ("AI tech news explained" if lesson.get('origin') == 'dypol-topic-override'
+                   else f"Chapter {lesson['chapter']} | Part {lesson['part']}"),
+        "visual_queries": intro_queries or sb.normalize_queries([], lesson['title']),
+        "image_prompt": body_slides[0]["image_prompt"] if body_slides else lesson['title'],
+    }
+    outro_slide = {
+        "title": "Thanks for Watching!", "kicker": "AI for Developers", "content": "",
+        "bullets": ["Like and share if this helped", "Subscribe for daily AI explainers"],
+        "visual_queries": body_slides[-1]["visual_queries"] if body_slides else ["technology"],
+        "image_prompt": body_slides[-1]["image_prompt"] if body_slides else "abstract technology",
+    }
+    all_slides = [intro_slide] + body_slides + [outro_slide]
 
     slide_scripts = [
         f"Hello and welcome to AI for Developers. Today’s lesson is titled {lesson['title']}.",
-        *[s['content'] for s in lesson_content['long_form_slides']],
+        *[s['content'] for s in body_slides],
         "Thanks for watching! If you found this helpful, make sure to subscribe to our channel and hit the like button."
     ]
+    for slide, script in zip(all_slides, slide_scripts):
+        slide["content"] = script
 
     slide_audio_paths = []
     for i, script in enumerate(slide_scripts):
@@ -79,21 +97,14 @@ def generate_lesson_assets(lesson):
         slide_audio_paths.append(wav_path)
     print(f"🎧 Total slide audios: {len(slide_audio_paths)}")
 
+    # Third-party assets are tracked job-wide so each is used once across both videos.
+    used_assets = {"hashes": set(), "ids": set()}
     slide_dir = OUTPUT_DIR / f"slides_long_{unique_id}"
-    slide_paths = []
-    for i, slide in enumerate(all_slides):
-        path = generate_visuals(
-            output_dir=slide_dir,
-            video_type='long',
-            slide_content=slide,
-            slide_number=i + 1,
-            total_slides=len(all_slides)
-        )
-        slide_paths.append(path)
-
     long_video_path = OUTPUT_DIR / f"long_video_{unique_id}.mp4"
     print(f"🎥 Creating long-form video at: {long_video_path}")
-    create_video(slide_paths, slide_audio_paths, long_video_path, 'long')
+    long_result = produce_long(all_slides, slide_audio_paths, slide_dir, long_video_path,
+                               gather_visuals, used_assets, lesson_terms=lesson_terms)
+    (slide_dir / "visual_manifest.json").write_text(json.dumps(long_result["manifest"], indent=2), encoding="utf-8")
 
     long_thumb_path = generate_visuals(
         output_dir=OUTPUT_DIR / f"thumbnails_long_{unique_id}",
@@ -102,28 +113,27 @@ def generate_lesson_assets(lesson):
     )
 
     print("\n--- Producing Short Video ---")
-    # short_script = f"{lesson_content['short_form_highlight']}"
-    short_script = (f"{lesson_content['short_form_highlight']}\n\n"
-    f"Link to the full lesson is in the description below.")
-    short_audio_mp3_path = OUTPUT_DIR / f"short_audio_{unique_id}.mp3"
-    short_audio_path = text_to_speech(short_script, short_audio_mp3_path)
-
+    highlight_text = (lesson_content.get("short_form_highlight") or "").strip()
+    hook = sb.clamp_bullet(lesson_content.get("short_hook") or "", 8)
+    short_script = " ".join(str(lesson_content.get("short_script") or "").split())
+    if len(short_script.split()) < 25:
+        short_script = f"{hook + '. ' if hook else ''}{highlight_text}".strip()
+    if hook and not short_script.casefold().startswith(hook.casefold()[:12]):
+        short_script = f"{hook.rstrip('.?!')}? {short_script}" if hook.endswith("?") else f"{hook.rstrip('.')}. {short_script}"
+    short_script = " ".join(short_script.replace("#", " ").split()[:110])
     short_slide_dir = OUTPUT_DIR / f"slides_short_{unique_id}"
-    short_slide_content = {
-        "title": "Quick Tip!",
-        "content": f"{lesson_content['short_form_highlight']}\n\n#AIforDevelopers"
-    }
-    short_slide_path = generate_visuals(
-        output_dir=short_slide_dir,
-        video_type='short',
-        slide_content=short_slide_content,
-        slide_number=1,
-        total_slides=1
-    )
-
+    short_slide_dir.mkdir(parents=True, exist_ok=True)
+    short_script, short_voice = fit_short_audio(
+        text_to_speech, short_script, "The full lesson is on our channel.", short_slide_dir)
+    short_queries = sb.normalize_queries(lesson_content.get("short_visual_queries"),
+                                         " ".join(q for s in body_slides for q in s["visual_queries"]))
+    short_spec = {"visual_queries": short_queries, "image_prompt": intro_slide["image_prompt"],
+                  "terms": sb.topic_terms(short_queries, *lesson_terms)}
     short_video_path = OUTPUT_DIR / f"short_video_{unique_id}.mp4"
     print(f"🎥 Creating short video at: {short_video_path}")
-    create_video([short_slide_path], [short_audio_path], short_video_path, 'short')
+    short_result = produce_short(short_script, short_voice, short_slide_dir, short_video_path,
+                                 gather_visuals, used_assets, short_spec, long_result["own_assets"])
+    (short_slide_dir / "visual_manifest.json").write_text(json.dumps(short_result["manifest"], indent=2), encoding="utf-8")
 
     short_thumb_path = generate_visuals(
         output_dir=OUTPUT_DIR / f"thumbnails_short_{unique_id}",

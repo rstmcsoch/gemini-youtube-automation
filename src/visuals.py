@@ -298,3 +298,281 @@ def select_visual(intent, output_path, used_hashes=None):
     return {"provider": "gradient", "source_url": "", "asset_id": "gradient-fallback",
             "license": "Original generated gradient", "license_url": "", "retrieved_at": _now(),
             "sha256": ""}, bool(kind in {"news_event", "product"} and intent.get("real_image_essential"))
+
+
+# ---------------------------------------------------------------------------
+# Multi-visual sourcing for the explainer editor (long video + Short).
+# Every returned asset carries flat manifest fields: provider, source_url,
+# asset_id, license, license_url, sha256, kind, retrieved_at.
+# ---------------------------------------------------------------------------
+import subprocess
+
+from src import storyboard as sb
+
+PIXABAY_LICENSE = "Pixabay Content License"
+PIXABAY_LICENSE_URL = "https://pixabay.com/service/license-summary/"
+FLUX_SOURCE_URL = "https://developers.cloudflare.com/workers-ai/models/flux-1-schnell/"
+FLUX_LICENSE = "AI-generated with FLUX.1 [schnell] (Apache-2.0 model) on Cloudflare Workers AI"
+FLUX_LICENSE_URL = "https://huggingface.co/black-forest-labs/FLUX.1-schnell"
+MAX_VIDEO_BYTES = 60 * 1024 * 1024
+
+
+def _sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _pixabay_cached_get(endpoint, params):
+    """GET a Pixabay endpoint with the mandatory 24 h result cache. Never raises."""
+    key = os.environ.get("PIXABAY_API_KEY", "").strip()
+    if not key:
+        return {}
+    cache_dir = Path(os.environ.get("VERTICALS_HOME", str(Path.home() / ".verticals"))) / "cache" / "pixabay"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    ident = json.dumps({"endpoint": endpoint, **params}, sort_keys=True).casefold()
+    cache_file = cache_dir / f"{hashlib.sha256(ident.encode()).hexdigest()}.json"
+    if cache_file.exists() and time.time() - cache_file.stat().st_mtime < 86400:
+        try:
+            return json.loads(cache_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    try:
+        response = requests.get(endpoint, params={"key": key, **params}, timeout=TIMEOUT)
+        if response.status_code == 429:
+            return {}
+        response.raise_for_status()
+        data = response.json()
+        cache_file.write_text(json.dumps(data), encoding="utf-8")
+        return data
+    except (requests.RequestException, ValueError, OSError):
+        return {}
+
+
+def pixabay_still_hits(query, orientation="horizontal"):
+    data = _pixabay_cached_get("https://pixabay.com/api/", {
+        "q": query[:100], "image_type": "photo", "orientation": orientation,
+        "safesearch": "true", "per_page": 20, "order": "popular",
+    })
+    return data.get("hits", []) if isinstance(data, dict) else []
+
+
+def pixabay_video_hits(query):
+    data = _pixabay_cached_get("https://pixabay.com/api/videos/", {
+        "q": query[:100], "video_type": "film", "safesearch": "true", "per_page": 15,
+    })
+    return data.get("hits", []) if isinstance(data, dict) else []
+
+
+def _probe_duration(path):
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                              "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=30).stdout
+        return float(out.strip() or 0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def _stock_still(query, terms, out_dir, used, orientation, label):
+    min_w, min_h = (1280, 720) if orientation == "horizontal" else (720, 1280)
+    hits = pixabay_still_hits(query, orientation)
+    ranked = []
+    for hit in hits:
+        ok, overlap, _ = sb.tag_relevance(hit.get("tags", ""), terms)
+        if not ok or f"pixabay:{hit.get('id')}" in used["ids"]:
+            continue
+        if int(hit.get("imageWidth") or 0) < min_w or int(hit.get("imageHeight") or 0) < min_h:
+            continue
+        ranked.append((len(overlap), hit, overlap))
+    ranked.sort(key=lambda item: -item[0])
+    for _, hit, overlap in ranked[:4]:
+        path = Path(out_dir) / f"{label}_px_{hit.get('id')}.png"
+        try:
+            meta = _download_candidate({"download_url": hit.get("largeImageURL") or hit.get("webformatURL")}, path)
+        except (requests.RequestException, OSError, ValueError):
+            path.unlink(missing_ok=True)
+            continue
+        if meta["sha256"] in used["hashes"]:
+            path.unlink(missing_ok=True)
+            continue
+        used["hashes"].add(meta["sha256"])
+        used["ids"].add(f"pixabay:{hit.get('id')}")
+        return {
+            "kind": "image", "provider": "pixabay", "source_url": hit.get("pageURL", ""),
+            "asset_id": str(hit.get("id", "")), "license": PIXABAY_LICENSE, "license_url": PIXABAY_LICENSE_URL,
+            "sha256": meta["sha256"], "retrieved_at": _now(), "tags": hit.get("tags", ""),
+            "query": query, "matched_terms": sorted(overlap), "width": meta["width"], "height": meta["height"],
+            "path": str(path), "reusable": False, "third_party": True,
+        }
+    return None
+
+
+def _stock_video(query, terms, out_dir, used, label, min_seconds=5):
+    hits = pixabay_video_hits(query)
+    ranked = []
+    for hit in hits:
+        ok, overlap, _ = sb.tag_relevance(hit.get("tags", ""), terms)
+        if not ok or f"pixabay-video:{hit.get('id')}" in used["ids"]:
+            continue
+        if float(hit.get("duration") or 0) < min_seconds:
+            continue
+        videos = hit.get("videos") or {}
+        rendition = None
+        for name in ("large", "medium"):
+            v = videos.get(name) or {}
+            if v.get("url") and int(v.get("width") or 0) >= 1280 and int(v.get("size") or 0) <= MAX_VIDEO_BYTES:
+                rendition = v
+                break
+        if rendition:
+            ranked.append((len(overlap), hit, rendition, overlap))
+    ranked.sort(key=lambda item: -item[0])
+    for _, hit, rendition, overlap in ranked[:3]:
+        path = Path(out_dir) / f"{label}_pxv_{hit.get('id')}.mp4"
+        try:
+            response = requests.get(rendition["url"], timeout=(8, 90))
+            response.raise_for_status()
+            path.write_bytes(response.content)
+        except (requests.RequestException, OSError):
+            path.unlink(missing_ok=True)
+            continue
+        duration = _probe_duration(path)
+        digest = _sha256(path)
+        if duration < 2 or digest in used["hashes"]:
+            path.unlink(missing_ok=True)
+            continue
+        used["hashes"].add(digest)
+        used["ids"].add(f"pixabay-video:{hit.get('id')}")
+        return {
+            "kind": "video", "provider": "pixabay_video", "source_url": hit.get("pageURL", ""),
+            "asset_id": str(hit.get("id", "")), "license": PIXABAY_LICENSE, "license_url": PIXABAY_LICENSE_URL,
+            "sha256": digest, "retrieved_at": _now(), "tags": hit.get("tags", ""), "query": query,
+            "matched_terms": sorted(overlap), "width": rendition.get("width"), "height": rendition.get("height"),
+            "duration": round(duration, 3), "path": str(path), "reusable": False, "third_party": True,
+        }
+    return None
+
+
+def flux_generate(scene, output_path, orientation="landscape", seed=None):
+    """Generate one FLUX still; returns a flat manifest dict or None. Never raises."""
+    account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+    if not account or not token:
+        return None
+    prompt = sb.flux_prompt(scene, orientation)
+    url = f"https://api.cloudflare.com/client/v4/accounts/{quote(account, safe='')}/ai/run/@cf/black-forest-labs/flux-1-schnell"
+    body = {"prompt": prompt, "steps": 6}
+    if seed is not None:
+        body["seed"] = int(seed) % 2_000_000_000
+    try:
+        response = requests.post(url, headers={"Authorization": f"Bearer {token}"}, json=body, timeout=(8, 90))
+        if response.status_code == 429:
+            return None
+        response.raise_for_status()
+        image_data = (response.json().get("result") or {}).get("image")
+        if not image_data:
+            return None
+        import base64
+        output_path = Path(output_path)
+        output_path.write_bytes(base64.b64decode(image_data))
+        with Image.open(output_path) as im:
+            im.verify()
+        with Image.open(output_path) as im:
+            width, height = im.size
+            im.convert("RGB").save(output_path, format="PNG")
+    except (requests.RequestException, ValueError, OSError):
+        return None
+    return {
+        "kind": "image", "provider": "cloudflare_workers_ai_flux", "source_url": FLUX_SOURCE_URL,
+        "asset_id": "flux-1-schnell", "license": FLUX_LICENSE, "license_url": FLUX_LICENSE_URL,
+        "sha256": _sha256(output_path), "retrieved_at": _now(), "prompt": prompt,
+        "width": width, "height": height, "path": str(output_path), "reusable": True, "third_party": False,
+    }
+
+
+def generated_graphic(output_path, size=(1920, 1080), seed=0):
+    """Last-resort original graphic (never black): soft gradient with glow rings."""
+    from PIL import ImageDraw, ImageFilter
+    import random
+    rng = random.Random(seed)
+    width, height = size
+    palettes = [((8, 20, 48), (22, 70, 120)), ((12, 16, 40), (70, 30, 110)), ((6, 30, 38), (20, 110, 120)),
+                ((20, 14, 36), (140, 60, 30))]
+    top, bottom = palettes[seed % len(palettes)]
+    img = Image.new("RGB", (width, height))
+    draw = ImageDraw.Draw(img)
+    for y in range(0, height, 4):
+        r = y / max(1, height - 1)
+        draw.rectangle((0, y, width, y + 4), fill=tuple(int(top[i] * (1 - r) + bottom[i] * r) for i in range(3)))
+    glow = Image.new("RGB", (width, height), (0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    for _ in range(6):
+        cx, cy = rng.randint(0, width), rng.randint(0, height)
+        rad = rng.randint(min(size) // 8, min(size) // 3)
+        color = (rng.randint(30, 90), rng.randint(90, 180), rng.randint(160, 255))
+        gd.ellipse((cx - rad, cy - rad, cx + rad, cy + rad), fill=color)
+    glow = glow.filter(ImageFilter.GaussianBlur(min(size) // 10))
+    img = Image.blend(img, glow, 0.35)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    img.save(output_path)
+    return {
+        "kind": "image", "provider": "dypol_generated_graphic", "source_url": "",
+        "asset_id": f"graphic-{seed}", "license": "Original generated graphic (no third-party content)",
+        "license_url": "", "sha256": _sha256(output_path), "retrieved_at": _now(),
+        "width": width, "height": height, "path": str(output_path), "reusable": True, "third_party": False,
+    }
+
+
+_FLUX_VARIANTS = ["wide establishing shot", "close-up detail shot", "conceptual metaphor scene",
+                  "overhead perspective"]
+
+
+def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s",
+                   allow_video=True, allow_still=True, seed=0):
+    """Collect `count` distinct visuals for one slide/Short.
+
+    spec: {"visual_queries": [...], "image_prompt": str, "terms": set}
+    used: job-wide {"hashes": set(), "ids": set()} so third-party assets are used once.
+    Mix: one stock video, one stock still, FLUX for the rest; each slot falls back
+    to the next provider and finally to an original graphic, so nothing is ever black.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    queries = list(spec.get("visual_queries") or ["technology"])
+    terms = set(spec.get("terms") or sb.topic_terms(queries))
+    px_orientation = "horizontal" if orientation == "landscape" else "vertical"
+    slots = []
+    if allow_video:
+        slots.append("video")
+    if allow_still:
+        slots.append("still")
+    while len(slots) < count:
+        slots.append("flux")
+    slots = slots[:count]
+    if count >= 2 and "flux" not in slots:
+        slots[-1] = "flux"  # at least one reusable own visual per slide
+    assets, flux_n = [], 0
+    for index, slot in enumerate(slots):
+        query = queries[index % len(queries)]
+        asset = None
+        order = {"video": ["video", "still", "flux"], "still": ["still", "flux"], "flux": ["flux", "still"]}[slot]
+        for provider in order:
+            if provider == "video" and allow_video:
+                asset = _stock_video(query, terms, out_dir, used, f"{label}_{index}")
+            elif provider == "still" and allow_still:
+                asset = _stock_still(query, terms, out_dir, used, px_orientation, f"{label}_{index}")
+            elif provider == "flux":
+                variant = _FLUX_VARIANTS[flux_n % len(_FLUX_VARIANTS)]
+                asset = flux_generate(f"{spec.get('image_prompt') or query}, {variant}",
+                                      out_dir / f"{label}_{index}_flux.png", orientation,
+                                      seed=seed * 31 + index)
+                flux_n += 1
+                if asset and asset["sha256"] in used["hashes"]:
+                    asset = None
+                if asset:
+                    used["hashes"].add(asset["sha256"])
+            if asset:
+                break
+        if asset is None:
+            size = (1920, 1080) if orientation == "landscape" else (1080, 1920)
+            asset = generated_graphic(out_dir / f"{label}_{index}_graphic.png", size, seed=seed * 7 + index)
+        asset["query"] = asset.get("query", query)
+        assets.append(asset)
+    return assets

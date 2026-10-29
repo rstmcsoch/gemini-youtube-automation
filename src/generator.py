@@ -203,10 +203,21 @@ def generate_lesson_content(lesson_title):
         The style is: Assume the viewer is a beginner developer or non-tech person who wants to learn AI from scratch.
         Use analogies and clear, simple language. Each concept must be explained from a developer's perspective, assuming no prior AI or ML knowledge.
 
-        Generate a JSON response with three keys:
-        1. "long_form_slides": A list of 7 to 8 slide objects for a longer, more detailed main video. Each object needs a "title" and "content" key.
+        Generate a JSON response with these keys:
+        1. "long_form_slides": A list of 7 to 8 slide objects for a longer, more detailed main video. Each object needs:
+           - "title": a short headline (max 8 words).
+           - "content": the full narration paragraph for this slide (spoken only, never shown on screen).
+           - "bullets": a list of at most 3 on-screen bullet points, each at most 8 words, in the order the narration covers them.
+           - "visual_queries": 2-3 short stock-footage search phrases (1-3 words each) naming concrete, photographable things
+             for this slide (e.g. "server room", "padlock circuit board"). No brand, company, product or person names.
+           - "image_prompt": one sentence describing a concrete scene to illustrate the slide. No brand names, no logos,
+             no text, letters or numbers, and no screens or documents showing writing.
         2. "short_form_highlight": A single, punchy, 1-2 sentence summary for a YouTube Short.
-        3. "hashtags": A string of 5-7 relevant, space-separated hashtags for this lesson (e.g., "#GenerativeAI #LLM #Developer","#NeuralNetworks #BeginnerAI #AIforDevelopers").
+        3. "short_hook": A scroll-stopping opening line for the Short, at most 8 words (a question or surprising fact).
+        4. "short_script": The Short's full narration, 55-85 words, starting with the exact short_hook, plain spoken
+           sentences, no hashtags, no emojis.
+        5. "short_visual_queries": 3 short stock-footage search phrases for the Short (same rules as visual_queries).
+        6. "hashtags": A string of 5-7 relevant, space-separated hashtags for this lesson (e.g., "#GenerativeAI #LLM #Developer","#NeuralNetworks #BeginnerAI #AIforDevelopers").
 
         Return only valid JSON.
         """
@@ -580,12 +591,13 @@ def create_video(slide_paths, audio_paths, output_path, video_type):
                 ImageClip(img_path)
                 .set_duration(duration)
                 .set_audio(audio_clip)
-                .fadein(0.5)
-                .fadeout(0.5)
             )
+            if i:
+                # Crossfade into the previous slide instead of dipping to black.
+                img_clip = img_clip.crossfadein(0.4)
             image_clips.append(img_clip)
 
-        final_video = concatenate_videoclips(image_clips, method="compose")
+        final_video = concatenate_videoclips(image_clips, method="compose", padding=-0.4)
 
         if BACKGROUND_MUSIC_PATH.exists():
             print("🎵 Adding background music...")
@@ -607,7 +619,7 @@ def create_video(slide_paths, audio_paths, output_path, video_type):
             codec="libx264",
             audio_codec="aac",
             audio_bitrate="192k",
-            preset="medium",
+            preset="veryfast",
             threads=4
         )
         print(f"✅ {video_type.capitalize()} video created successfully!")
