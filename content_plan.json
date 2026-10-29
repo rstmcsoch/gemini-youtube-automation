@@ -242,6 +242,16 @@
       "youtube_id": null,
       "origin": "dypol-topic-override",
       "uploads": []
+    },
+    {
+      "chapter": "Ad-hoc",
+      "part": "How AI catches phishing emails",
+      "title": "How AI catches phishing emails",
+      "topic": "How AI catches phishing emails",
+      "status": "draft_ready",
+      "youtube_id": null,
+      "origin": "dypol-topic-override",
+      "uploads": []
     }
   ]
 }
