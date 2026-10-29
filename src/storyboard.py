@@ -59,6 +59,7 @@ OFF_TOPIC = {
     "depression", "suicide", "hang", "hanging", "noose", "rope", "gun", "weapon", "blood", "death",
     "funeral", "war", "soldier", "warrior", "religion", "church", "politics", "flag", "christmas",
     "halloween", "food", "cake", "recipe", "drink", "alcohol",
+    "police", "riot", "protest", "demonstration", "military", "army", "crowd",
     "spider", "cobweb", "insect", "flower", "nature", "landscape", "sunset", "beach",
 }
 
