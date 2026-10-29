@@ -289,3 +289,31 @@ def test_workflow_uses_pip_cache_and_renderer_uses_veryfast():
     assert "cache: 'pip'" in workflow
     assert '"veryfast"' in (REPO / "src/explainer.py").read_text()
     assert 'preset="veryfast"' in (REPO / "src/generator.py").read_text()
+
+
+def test_metaphor_stock_hits_rejected():
+    from src import storyboard as sb
+    terms = sb.topic_terms("phishing scams firewall defense game")
+    for tags in ["seal, sea lion, animal", "fire, flame, fireplace", "chess, game, strategy",
+                 "heart, padlock, love", "fire safety, sprinkler, standpipe"]:
+        assert not sb.tag_relevance(tags, terms)[0], tags
+
+
+def test_tech_stock_hit_accepted():
+    from src import storyboard as sb
+    terms = sb.topic_terms("server security network")
+    assert sb.tag_relevance("server, data center, network", terms)[0]
+
+
+def test_flux_body_has_no_seed(monkeypatch, tmp_path):
+    from src import visuals
+    sent = {}
+    class R:
+        status_code = 400
+        text = "bad"
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.update(json); return R()
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "a"); monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "t")
+    monkeypatch.setattr(visuals.requests, "post", fake_post)
+    assert visuals.flux_generate("servers", tmp_path / "x.png", seed=5) is None
+    assert "seed" not in sent and set(sent) == {"prompt", "steps"}

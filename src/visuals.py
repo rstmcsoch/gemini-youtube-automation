@@ -458,14 +458,15 @@ def flux_generate(scene, output_path, orientation="landscape", seed=None):
         return None
     prompt = sb.flux_prompt(scene, orientation)
     url = f"https://api.cloudflare.com/client/v4/accounts/{quote(account, safe='')}/ai/run/@cf/black-forest-labs/flux-1-schnell"
+    # flux-1-schnell accepts only prompt + steps (a "seed" field is rejected with
+    # HTTP 400 "Additional or unevaluated properties '/seed'"), so variety comes
+    # from the prompt variants instead.
     body = {"prompt": prompt, "steps": 6}
-    if seed is not None:
-        body["seed"] = int(seed) % 2_000_000_000
     try:
         response = requests.post(url, headers={"Authorization": f"Bearer {token}"}, json=body, timeout=(8, 90))
-        if response.status_code == 429:
+        if response.status_code != 200:
+            print(f"FLUX request failed: HTTP {response.status_code} {response.text[:200]}")
             return None
-        response.raise_for_status()
         image_data = (response.json().get("result") or {}).get("image")
         if not image_data:
             return None
@@ -477,7 +478,8 @@ def flux_generate(scene, output_path, orientation="landscape", seed=None):
         with Image.open(output_path) as im:
             width, height = im.size
             im.convert("RGB").save(output_path, format="PNG")
-    except (requests.RequestException, ValueError, OSError):
+    except (requests.RequestException, ValueError, OSError) as exc:
+        print(f"FLUX generation failed: {exc}")
         return None
     return {
         "kind": "image", "provider": "cloudflare_workers_ai_flux", "source_url": FLUX_SOURCE_URL,

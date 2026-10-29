@@ -98,6 +98,22 @@ def topic_terms(*texts):
     return terms
 
 
+# Stock hits must visibly show technology. Metaphor matches (a seal for "phishing",
+# fire for "firewall", chess for "cat-and-mouse game", a heart padlock, a sprinkler
+# sign) all passed the topic-overlap check in the first redesigned draft.
+TECH_ANCHORS_RAW = {
+    "computer", "server", "network", "data", "datacenter", "code", "coding", "programming",
+    "programmer", "software", "hardware", "cyber", "cybersecurity", "security", "hacker", "hacking",
+    "technology", "tech", "digital", "chip", "processor", "cpu", "gpu", "circuit", "electronics",
+    "electronic", "laptop", "keyboard", "monitor", "screen", "internet", "cable", "fiber", "optic",
+    "robot", "robotics", "artificial", "intelligence", "algorithm", "smartphone", "binary", "matrix",
+    "router", "encryption", "firewall", "virus", "malware", "password", "website", "dashboard",
+    "analytics", "automation", "engineer", "semiconductor", "silicon", "microchip", "motherboard",
+    "email", "e-mail", "spam", "phishing", "radar", "hacker", "coder", "developer",
+}
+TECH_ANCHORS = {_stem(w) for w in TECH_ANCHORS_RAW} | TECH_ANCHORS_RAW
+
+
 def tag_relevance(tags, terms):
     """Return (ok, overlap, reason) for a stock hit's comma-separated tags."""
     tag_tokens = set()
@@ -114,6 +130,8 @@ def tag_relevance(tags, terms):
     overlap = (tag_tokens & terms) - BRANDS - AMBIGUOUS
     if not overlap:
         return False, set(), "no tag overlaps topic keywords"
+    if not (tag_tokens & TECH_ANCHORS):
+        return False, set(), "no technology subject in tags"
     return True, overlap, "ok"
 
 
