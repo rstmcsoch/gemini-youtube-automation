@@ -132,7 +132,8 @@ def generate_lesson_assets(lesson):
     short_video_path = OUTPUT_DIR / f"short_video_{unique_id}.mp4"
     print(f"🎥 Creating short video at: {short_video_path}")
     short_result = produce_short(short_script, short_voice, short_slide_dir, short_video_path,
-                                 gather_visuals, used_assets, short_spec, long_result["own_assets"])
+                                 gather_visuals, used_assets, short_spec, long_result["own_assets"],
+                                 fallback_assets=long_result.get("stock_assets", ()))
     (short_slide_dir / "visual_manifest.json").write_text(json.dumps(short_result["manifest"], indent=2), encoding="utf-8")
 
     short_thumb_path = generate_visuals(
@@ -176,6 +177,8 @@ def generate_lesson_assets(lesson):
         "lesson_title": lesson["title"],
         "review_required": visual_review_required,
         "visual_manifest": visual_manifests,
+        # Sources skipped this run after a quota/limit hit (e.g. FLUX daily neurons, Pixabay 429).
+        "provider_limits": __import__("src.visuals", fromlist=["breaker_status"]).breaker_status(),
         "assets": [
             {
                 "kind": "long",

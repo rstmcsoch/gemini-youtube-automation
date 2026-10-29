@@ -61,7 +61,22 @@ OFF_TOPIC = {
     "halloween", "food", "cake", "recipe", "drink", "alcohol",
     "police", "riot", "protest", "demonstration", "military", "army", "crowd",
     "spider", "cobweb", "insect", "flower", "nature", "landscape", "sunset", "beach",
+    # Run 40882671743 review: road barrier, hanging crystals/prisms, spiral staircase,
+    # photographer with camera slipped through on generic "technology"/"digital" tags.
+    "barrier", "barricade", "construction", "roadwork", "roadworks", "road", "cone", "crystal",
+    "crystals", "prism", "prisms", "chandelier", "staircase", "stair", "stairs", "stairway",
+    "stairwell", "spiral", "photographer", "photography", "photograph", "photoshoot", "lens",
+    "skyline", "cityscape",
 }
+
+# Multi-word tag phrases that are off-topic even when each word alone is harmless.
+OFF_TOPIC_PHRASES = ("traffic cone", "camera lens", "road construction", "construction site",
+                     "warning tape", "photo shoot")
+
+# Science imagery is rejected unless the tags carry a *strong* computing subject; generic
+# anchors like "technology" or "digital" are pasted on nearly every stock photo.
+SCIENCE_OFF_TOPIC = {"microscope", "laboratory", "lab", "test tube", "petri", "pipette", "chemistry",
+                     "biology", "beaker"}
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9'+-]*")
 
@@ -114,6 +129,46 @@ TECH_ANCHORS_RAW = {
     "email", "e-mail", "spam", "phishing", "radar", "hacker", "coder", "developer",
 }
 TECH_ANCHORS = {_stem(w) for w in TECH_ANCHORS_RAW} | TECH_ANCHORS_RAW
+_WEAK_ANCHORS = {"technology", "tech", "digital", "data", "security", "electronic", "electronics",
+                 "artificial", "intelligence", "innovation", "engineer", "automation", "analytics"}
+STRONG_TECH_ANCHORS = TECH_ANCHORS - _WEAK_ANCHORS - {_stem(w) for w in _WEAK_ANCHORS}
+
+# Broad technology queries used when FLUX is unavailable and per-slide queries run dry.
+FALLBACK_TECH_QUERIES = (
+    "cybersecurity", "email inbox", "laptop screen code", "server room", "data network",
+    "hacker hoodie keyboard", "padlock digital",
+)
+
+
+def fallback_queries(terms, seed=0, limit=None):
+    """Tech-anchor queries ordered by overlap with the topic terms, then rotated by seed."""
+    terms = {_stem(t) for t in (terms or ())} | set(terms or ())
+    scored = []
+    for i, q in enumerate(FALLBACK_TECH_QUERIES):
+        overlap = len({_stem(w) for w in _WORD.findall(q)} & terms)
+        scored.append((-overlap, (i - seed) % len(FALLBACK_TECH_QUERIES), q))
+    ordered = [q for _, _, q in sorted(scored)]
+    return ordered[:limit] if limit else ordered
+
+
+def offtopic_reason(text, terms=()):
+    """Reason string when stock tags/titles show off-topic imagery, else ''."""
+    raw = str(text or "").casefold()
+    words = {_stem(w) for w in _WORD.findall(raw)} | {w.casefold() for w in _WORD.findall(raw)}
+    topic = set(terms or ())
+    animals = (words & ANIMALS) - topic
+    if animals:
+        return f"animal tags not in topic: {sorted(animals)[:3]}"
+    off = (words & OFF_TOPIC) - topic
+    if off:
+        return f"off-topic tags: {sorted(off)[:3]}"
+    for phrase in OFF_TOPIC_PHRASES:
+        if phrase in raw and not set(phrase.split()) <= topic:
+            return f"off-topic phrase: {phrase}"
+    science = {s for s in SCIENCE_OFF_TOPIC if (s in words if " " not in s else s in raw)} - topic
+    if science and not (words & STRONG_TECH_ANCHORS):
+        return f"science imagery without computing subject: {sorted(science)[:3]}"
+    return ""
 
 
 def tag_relevance(tags, terms):
@@ -122,13 +177,9 @@ def tag_relevance(tags, terms):
     for tag in str(tags or "").split(","):
         tag_tokens.update(_stem(w) for w in _WORD.findall(tag))
     terms = set(terms or ())
-    raw_topic = set(terms)
-    animals = (tag_tokens & ANIMALS) - raw_topic
-    if animals:
-        return False, set(), f"animal tags not in topic: {sorted(animals)[:3]}"
-    off = (tag_tokens & OFF_TOPIC) - raw_topic
-    if off:
-        return False, set(), f"off-topic tags: {sorted(off)[:3]}"
+    reason = offtopic_reason(tags, terms)
+    if reason:
+        return False, set(), reason
     overlap = (tag_tokens & terms) - BRANDS - AMBIGUOUS
     if not overlap:
         return False, set(), "no tag overlaps topic keywords"
@@ -294,15 +345,26 @@ def coverage_gaps(timeline, fps=30):
     return gaps
 
 
-def assign_assets(n_shots, assets, seed=0):
-    """Map shots to assets: each unique asset once first, extra shots reuse only own/AI assets.
+GRAPHIC_PROVIDER = "dypol_generated_graphic"
+MAX_GRAPHIC_SHARE = 0.10   # gradient fallbacks above 10 % of shots => review_required
 
-    Third-party stills and videos are never repeated (rights/"used once" rule).
+
+def assign_assets(n_shots, assets, seed=0, allow_stock_reuse=False):
+    """Map shots to assets: each unique asset once first, extra shots reuse own/AI assets.
+
+    By default third-party stills and videos are never repeated. With
+    allow_stock_reuse=True (FLUX unavailable), when no own/AI asset exists the
+    slide's real stock assets are reused (non-consecutively) instead of leaving a
+    gap for a gradient placeholder.
     """
     if not assets:
         return []
     order = list(range(len(assets)))
-    reusable = [i for i, a in enumerate(assets) if a.get("reusable")]
+    reusable = [i for i, a in enumerate(assets) if a.get("reusable") and a.get("provider") != GRAPHIC_PROVIDER]
+    if not reusable and allow_stock_reuse:
+        reusable = [i for i, a in enumerate(assets) if a.get("provider") != GRAPHIC_PROVIDER]
+    if not reusable:
+        reusable = [i for i, a in enumerate(assets) if a.get("reusable")]
     plan = []
     for k in range(n_shots):
         if k < len(order):
@@ -318,6 +380,15 @@ def assign_assets(n_shots, assets, seed=0):
             if alt:
                 plan[k] = alt[0]
     return plan
+
+
+def graphic_share(shot_assets):
+    """Fraction of shots showing a gradient fallback graphic."""
+    shot_assets = list(shot_assets or [])
+    if not shot_assets:
+        return 0.0
+    n = sum(1 for a in shot_assets if a and a.get("provider") == GRAPHIC_PROVIDER)
+    return n / len(shot_assets)
 
 
 def estimate_word_timings(text, duration, speech_regions=None, lead=0.05):

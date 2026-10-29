@@ -15,8 +15,66 @@ from urllib.parse import quote
 import requests
 from PIL import Image
 
+from src import storyboard as sb
+
 ALLOWED_WIKIMEDIA_LICENSES = {"public domain", "pd", "cc0", "cc-zero", "public domain mark", "pd-mark"}
 TIMEOUT = (5, 15)
+
+# ---------------------------------------------------------------------------
+# Per-run circuit breakers. Rule: when a provider hits a quota / rate limit, skip
+# that source for the rest of the run and continue with what is available;
+# never stall retrying it and never pad with placeholders because of it.
+# ---------------------------------------------------------------------------
+_QUOTA_MARKERS = ("daily free allocation", "quota", "rate limit", "rate-limit", "ratelimit",
+                  "too many requests", "resource_exhausted", "neurons", "limit exceeded",
+                  "exceeded your", "capacity temporarily exceeded")
+_BREAKERS = {}
+
+
+def is_quota_error(status_code, body=""):
+    """True for HTTP 429 or any error body that reads as a quota / allocation limit."""
+    try:
+        if int(status_code) == 429:
+            return True
+    except (TypeError, ValueError):
+        pass
+    text = str(body or "").casefold()
+    return any(marker in text for marker in _QUOTA_MARKERS)
+
+
+def breaker_open(name):
+    return name in _BREAKERS
+
+
+def trip_breaker(name, reason=""):
+    """Open the breaker for `name` for the rest of this process; logs exactly once."""
+    if name in _BREAKERS:
+        return False
+    _BREAKERS[name] = {"reason": str(reason)[:200], "at": _now()}
+    print(f"⚠️ {name} quota/limit hit ({str(reason)[:160]}); skipping {name} for the rest of this run "
+          "and continuing with other sources.", flush=True)
+    return True
+
+
+def reset_breakers():
+    _BREAKERS.clear()
+
+
+def breaker_status():
+    return {name: dict(info) for name, info in _BREAKERS.items()}
+
+
+def flux_available():
+    """FLUX can be called: credentials present and its breaker is closed."""
+    return (not breaker_open("flux") and bool(os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip())
+            and bool(os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()))
+
+
+def _response_text(response):
+    try:
+        return str(getattr(response, "text", "") or "")
+    except Exception:  # noqa: BLE001 - a broken body must never break the run
+        return ""
 
 
 def _now():
@@ -124,12 +182,15 @@ def _pixabay_candidates(query):
         except (OSError, ValueError):
             data = None
     if data is None:
+        if breaker_open("pixabay"):
+            return []
         try:
             response = requests.get("https://pixabay.com/api/", params={
                 "key": key, "q": query[:100], "image_type": "photo",
                 "orientation": "vertical", "safesearch": "true", "per_page": 12,
             }, timeout=TIMEOUT)
             if response.status_code == 429:
+                trip_breaker("pixabay", "HTTP 429")
                 return []
             response.raise_for_status()
             data = response.json()
@@ -138,6 +199,8 @@ def _pixabay_candidates(query):
             return []
     candidates = []
     for hit in data.get("hits", []):
+        if sb.offtopic_reason(hit.get("tags", "")):
+            continue
         candidates.append({
             "provider": "pixabay", "source_url": hit.get("pageURL", ""),
             "asset_id": str(hit.get("id", "")), "license": "Pixabay Content License",
@@ -152,14 +215,15 @@ def _pixabay_candidates(query):
 def _cloudflare_generate(prompt, output_path):
     account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
     token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
-    if not account or not token:
+    if not account or not token or breaker_open("flux"):
         return None
     url = f"https://api.cloudflare.com/client/v4/accounts/{quote(account, safe='')}/ai/run/@cf/black-forest-labs/flux-1-schnell"
     try:
         response = requests.post(url, headers={"Authorization": f"Bearer {token}"},
                                  json={"prompt": f"Vertical 9:16 editorial illustration, no text, no watermark: {prompt}"},
                                  timeout=(8, 60))
-        if response.status_code == 429:
+        if response.status_code != 200 and is_quota_error(response.status_code, _response_text(response)):
+            trip_breaker("flux", f"HTTP {response.status_code}")
             return None
         response.raise_for_status()
         data = response.json()
@@ -255,6 +319,8 @@ def select_visual(intent, output_path, used_hashes=None):
         for candidate in ranked:
             if not candidate.get("download_url"):
                 continue
+            if sb.offtopic_reason(candidate.get("title", ""), _tokens(query)):
+                continue
             score = relevance_score(candidate, intent)
             if score < 0.20:
                 continue
@@ -307,8 +373,6 @@ def select_visual(intent, output_path, used_hashes=None):
 # ---------------------------------------------------------------------------
 import subprocess
 
-from src import storyboard as sb
-
 PIXABAY_LICENSE = "Pixabay Content License"
 PIXABAY_LICENSE_URL = "https://pixabay.com/service/license-summary/"
 FLUX_SOURCE_URL = "https://developers.cloudflare.com/workers-ai/models/flux-1-schnell/"
@@ -335,9 +399,12 @@ def _pixabay_cached_get(endpoint, params):
             return json.loads(cache_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
+    if breaker_open("pixabay"):
+        return {}  # cached results above are still served; no new requests this run
     try:
         response = requests.get(endpoint, params={"key": key, **params}, timeout=TIMEOUT)
         if response.status_code == 429:
+            trip_breaker("pixabay", "HTTP 429")
             return {}
         response.raise_for_status()
         data = response.json()
@@ -454,7 +521,7 @@ def flux_generate(scene, output_path, orientation="landscape", seed=None):
     """Generate one FLUX still; returns a flat manifest dict or None. Never raises."""
     account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
     token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
-    if not account or not token:
+    if not account or not token or breaker_open("flux"):
         return None
     prompt = sb.flux_prompt(scene, orientation)
     url = f"https://api.cloudflare.com/client/v4/accounts/{quote(account, safe='')}/ai/run/@cf/black-forest-labs/flux-1-schnell"
@@ -465,7 +532,12 @@ def flux_generate(scene, output_path, orientation="landscape", seed=None):
     try:
         response = requests.post(url, headers={"Authorization": f"Bearer {token}"}, json=body, timeout=(8, 90))
         if response.status_code != 200:
-            print(f"FLUX request failed: HTTP {response.status_code} {response.text[:200]}")
+            body = _response_text(response)
+            if is_quota_error(response.status_code, body):
+                # e.g. 429 "you have used up your daily free allocation of 10,000 neurons"
+                trip_breaker("flux", f"HTTP {response.status_code} {body[:120]}")
+            else:
+                print(f"FLUX request failed: HTTP {response.status_code} {body[:200]}")
             return None
         image_data = (response.json().get("result") or {}).get("image")
         if not image_data:
@@ -526,17 +598,29 @@ _FLUX_VARIANTS = ["wide establishing shot", "close-up detail shot", "conceptual 
                   "overhead perspective"]
 
 
+def _stock_attempt(kind, query, terms, out_dir, used, px_orientation, label):
+    if kind == "video":
+        return _stock_video(query, terms, out_dir, used, label)
+    return _stock_still(query, terms, out_dir, used, px_orientation, label)
+
+
 def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s",
-                   allow_video=True, allow_still=True, seed=0):
-    """Collect `count` distinct visuals for one slide/Short.
+                   allow_video=True, allow_still=True, seed=0, min_count=None):
+    """Collect up to `count` distinct visuals for one slide/Short.
 
     spec: {"visual_queries": [...], "image_prompt": str, "terms": set}
     used: job-wide {"hashes": set(), "ids": set()} so third-party assets are used once.
-    Mix: one stock video, one stock still, FLUX for the rest; each slot falls back
-    to the next provider and finally to an original graphic, so nothing is ever black.
+    Mix: one stock video, one stock still, FLUX for the rest.
+
+    When FLUX is unavailable (no credentials or its quota breaker tripped) the FLUX
+    slots are filled from Pixabay video + stills instead, trying every slide query
+    and then broad tech-anchor queries. A gradient graphic is only produced while
+    fewer than `min_count` assets exist (default: `count`, i.e. never fewer than
+    asked); callers that can reuse real assets pass min_count=0 and fill the rest.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    min_count = count if min_count is None else max(0, min(int(min_count), count))
     queries = list(spec.get("visual_queries") or ["technology"])
     terms = set(spec.get("terms") or sb.topic_terms(queries))
     px_orientation = "horizontal" if orientation == "landscape" else "vertical"
@@ -550,20 +634,22 @@ def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s
     slots = slots[:count]
     if count >= 2 and "flux" not in slots:
         slots[-1] = "flux"  # at least one reusable own visual per slide
+    stock_kinds = [k for k, ok in (("video", allow_video), ("still", allow_still)) if ok]
+    broad = sb.fallback_queries(terms, seed=seed)
     assets, flux_n = [], 0
     for index, slot in enumerate(slots):
         query = queries[index % len(queries)]
         asset = None
+        sub = f"{label}_{index}"
         order = {"video": ["video", "still", "flux"], "still": ["still", "flux"], "flux": ["flux", "still"]}[slot]
         for provider in order:
-            if provider == "video" and allow_video:
-                asset = _stock_video(query, terms, out_dir, used, f"{label}_{index}")
-            elif provider == "still" and allow_still:
-                asset = _stock_still(query, terms, out_dir, used, px_orientation, f"{label}_{index}")
-            elif provider == "flux":
+            if provider in ("video", "still"):
+                if (provider == "video" and allow_video) or (provider == "still" and allow_still):
+                    asset = _stock_attempt(provider, query, terms, out_dir, used, px_orientation, sub)
+            elif provider == "flux" and flux_available():
                 variant = _FLUX_VARIANTS[flux_n % len(_FLUX_VARIANTS)]
                 asset = flux_generate(f"{spec.get('image_prompt') or query}, {variant}",
-                                      out_dir / f"{label}_{index}_flux.png", orientation,
+                                      out_dir / f"{sub}_flux.png", orientation,
                                       seed=seed * 31 + index)
                 flux_n += 1
                 if asset and asset["sha256"] in used["hashes"]:
@@ -572,9 +658,29 @@ def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s
                     used["hashes"].add(asset["sha256"])
             if asset:
                 break
+        if asset is None and stock_kinds:
+            # Stock widening: other slide queries first (strict topic gate), then broad
+            # tech-anchor queries whose own words may prove relevance. Each query is one
+            # cached Pixabay request; after a Pixabay 429 only cached results are served.
+            # At most one extra clip per slide (index 2) keeps downloads bounded; stills otherwise.
+            first = "video" if slot == "video" or (slot == "flux" and index == 2) else "still"
+            kinds = [first] + [k for k in ("video", "still") if k != first]
+            kinds = [k for k in kinds if k in stock_kinds]
+            extra = [(q, terms) for q in queries if q != query]
+            extra += [(q, terms | sb.topic_terms(q)) for q in broad]
+            for q, q_terms in extra:
+                for kind in kinds:
+                    asset = _stock_attempt(kind, q, q_terms, out_dir, used, px_orientation, sub)
+                    if asset:
+                        asset["fallback_query"] = True
+                        break
+                if asset:
+                    break
         if asset is None:
+            if len(assets) >= min_count:
+                continue  # caller reuses real assets instead of a placeholder
             size = (1920, 1080) if orientation == "landscape" else (1080, 1920)
-            asset = generated_graphic(out_dir / f"{label}_{index}_graphic.png", size, seed=seed * 7 + index)
+            asset = generated_graphic(out_dir / f"{sub}_graphic.png", size, seed=seed * 7 + index)
         asset["query"] = asset.get("query", query)
         assets.append(asset)
     return assets
