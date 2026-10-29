@@ -59,6 +59,7 @@ OFF_TOPIC = {
     "depression", "suicide", "hang", "hanging", "noose", "rope", "gun", "weapon", "blood", "death",
     "funeral", "war", "soldier", "warrior", "religion", "church", "politics", "flag", "christmas",
     "halloween", "food", "cake", "recipe", "drink", "alcohol",
+    "spider", "cobweb", "insect", "flower", "nature", "landscape", "sunset", "beach",
 }
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9'+-]*")

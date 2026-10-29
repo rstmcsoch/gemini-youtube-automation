@@ -170,7 +170,7 @@ def generate_curriculum(previous_titles=None):
             history = f"The following lessons have already been created:\n{formatted}\n\nPlease continue from where this series left off.\n"
 
         prompt = f"""
-        You are an expert AI educator. Generate a curriculum for a YouTube series called 'AI for Developers'.
+        You are an expert AI educator. Generate a curriculum for a YouTube series called '{__import__('os').environ.get('CHANNEL_BRAND', 'Signal by DYPOL')}'.
         Do not include any person's name, presenter name, creator attribution, or personal credit in titles, descriptions, tags, slide text, or narration.
         {history}
         The style must be: 'Assume the viewer is a beginner or non-technical person starting their journey into AI as a developer.
@@ -198,7 +198,7 @@ def generate_lesson_content(lesson_title):
     try:
         client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
         prompt = f"""
-        You are creating a lesson for the 'AI for Developers' series. The topic is '{lesson_title}'.
+        You are creating a lesson for the '{__import__('os').environ.get('CHANNEL_BRAND', 'Signal by DYPOL')}' series. The topic is '{lesson_title}'.
         Do not include any person's name, presenter name, creator attribution, or personal credit in titles, descriptions, tags, slide text, or narration.
         The style is: Assume the viewer is a beginner developer or non-tech person who wants to learn AI from scratch.
         Use analogies and clear, simple language. Each concept must be explained from a developer's perspective, assuming no prior AI or ML knowledge.
@@ -561,7 +561,7 @@ def generate_visuals(output_dir, video_type, slide_content=None, thumbnail_title
         footer_y = height - footer_height
         draw.rectangle((0, footer_y, width, height), fill=(10, 20, 39))
         draw.rectangle((0, footer_y, width, footer_y + max(4, int(height * 0.004))), fill=accent)
-        footer_text = "AI for Developers"
+        footer_text = __import__("os").environ.get("CHANNEL_BRAND", "Signal by DYPOL")
         footer_font = _load_visual_font(max(18, int(min(width, height) * 0.022)))
         draw.text((int(width * 0.035), footer_y + int(footer_height * 0.30)), footer_text, font=footer_font, fill=(176, 193, 215))
         if total_slides > 0:

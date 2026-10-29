@@ -322,7 +322,8 @@ def render_lower_third(slide, size):
     return panel, (x0, y0), bullets
 
 
-def render_bug(size, text="AI for Developers"):
+def render_bug(size, text=None):
+    text = text or __import__("os").environ.get("CHANNEL_BRAND", "Signal by DYPOL")
     w, h = size
     fnt = font(int(min(w, h) * 0.024), bold=True)
     probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))

@@ -75,7 +75,7 @@ def generate_lesson_assets(lesson):
         "image_prompt": body_slides[0]["image_prompt"] if body_slides else lesson['title'],
     }
     outro_slide = {
-        "title": "Thanks for Watching!", "kicker": "AI for Developers", "content": "",
+        "title": "Thanks for Watching!", "kicker": __import__("os").environ.get("CHANNEL_BRAND", "Signal by DYPOL"), "content": "",
         "bullets": ["Like and share if this helped", "Subscribe for daily AI explainers"],
         "visual_queries": body_slides[-1]["visual_queries"] if body_slides else ["technology"],
         "image_prompt": body_slides[-1]["image_prompt"] if body_slides else "abstract technology",
@@ -83,7 +83,7 @@ def generate_lesson_assets(lesson):
     all_slides = [intro_slide] + body_slides + [outro_slide]
 
     slide_scripts = [
-        f"Hello and welcome to AI for Developers. Today’s lesson is titled {lesson['title']}.",
+        f"Hello and welcome to {__import__('os').environ.get('CHANNEL_BRAND', 'Signal by DYPOL')}. Today’s lesson is titled {lesson['title']}.",
         *[s['content'] for s in body_slides],
         "Thanks for watching! If you found this helpful, make sure to subscribe to our channel and hit the like button."
     ]
@@ -143,7 +143,7 @@ def generate_lesson_assets(lesson):
 
     hashtags = lesson_content.get("hashtags", "#AI #Developer #LearnAI")
     long_desc = (
-        f"Part of the AI for Developers series.\n\n"
+        f"Part of the {__import__('os').environ.get('CHANNEL_BRAND', 'Signal by DYPOL')} series.\n\n"
         f"Today's Lesson: {lesson['title']}\n\n{hashtags}"
     )
     long_tags = "AI, Artificial Intelligence, Developer, Programming, Tutorial, " + lesson["title"].replace(" ", ", ")
