@@ -238,10 +238,26 @@
       "part": "How AI spots unusual network traffic",
       "title": "How AI spots unusual network traffic",
       "topic": "How AI spots unusual network traffic",
-      "status": "draft_ready",
-      "youtube_id": null,
+      "status": "complete",
+      "youtube_id": "KmHWkeCO6wI",
       "origin": "dypol-topic-override",
-      "uploads": []
+      "uploads": [
+        {
+          "kind": "long",
+          "youtube_id": "KmHWkeCO6wI",
+          "youtube_url": "https://youtu.be/KmHWkeCO6wI",
+          "visibility": "unlisted",
+          "at": "2026-10-29T14:02:12.206328+00:00"
+        },
+        {
+          "kind": "short",
+          "youtube_id": "Qup_zUNcmww",
+          "youtube_url": "https://youtu.be/Qup_zUNcmww",
+          "visibility": "unlisted",
+          "at": "2026-10-29T14:02:12.206337+00:00"
+        }
+      ],
+      "youtube_short_id": "Qup_zUNcmww"
     },
     {
       "chapter": "Ad-hoc",

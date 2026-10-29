@@ -1,0 +1,26 @@
+{
+  "job_id": "job-mvtkc9wy-heuiut",
+  "run_id": "40887320354",
+  "status": "uploaded",
+  "visibility": "unlisted",
+  "videos": [
+    {
+      "kind": "long",
+      "youtube_id": "KmHWkeCO6wI",
+      "youtube_url": "https://youtu.be/KmHWkeCO6wI",
+      "title": "How AI spots unusual network traffic",
+      "visibility": "unlisted"
+    },
+    {
+      "kind": "short",
+      "youtube_id": "Qup_zUNcmww",
+      "youtube_url": "https://youtu.be/Qup_zUNcmww",
+      "title": "How AI spots unusual network traffic #Shorts",
+      "visibility": "unlisted"
+    }
+  ],
+  "youtube_id": "KmHWkeCO6wI",
+  "youtube_url": "https://youtu.be/KmHWkeCO6wI",
+  "video_count": 2,
+  "recorded_at": "2026-10-29T14:02:12.205432+00:00"
+}
