@@ -1,4 +1,6 @@
 name: Autonomous AI Course Generator
+# The console matches runs to jobs by display_title, so it carries the job id and phase.
+run-name: "${{ inputs.job_id || github.run_id }} (${{ inputs.phase || 'n/a' }})"
 
 on:
   schedule:
@@ -49,6 +51,11 @@ on:
         description: 'Optional reviewed description for the long-form video'
         required: false
         default: ''
+      reviewer_feedback:
+        description: 'Reviewer notes from a rejected attempt (redo); max 1500 chars are used'
+        required: false
+        default: ''
+        type: string
 
 # A run takes far longer than the gap between a manual dispatch and the daily
 # schedule, so serialise them — two runs pushing to main race each other.
@@ -68,10 +75,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 🐍 Set up Python
+        id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
+
+      # Speed: restore the fully installed virtualenv; pip install is skipped on a hit.
+      - name: ♻️ Cache Python virtualenv
+        id: venv-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.venv-dypol
+          key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}-v1
 
       - name: 🧪 Compile-check code and verify safe phase defaults
         run: |
@@ -95,9 +111,13 @@ jobs:
           PY
 
       - name: 📦 Install dependencies and patch ImageMagick
+        env:
+          VENV_CACHE_HIT: ${{ steps.venv-cache.outputs.cache-hit }}
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y imagemagick ffmpeg
+          # --no-install-recommends: ~126 -> far fewer packages (no pocketsphinx, docs, extra codecs).
+          sudo apt-get install -y --no-install-recommends imagemagick ffmpeg
           POLICY_FILE=$(find /etc -name "policy.xml" 2>/dev/null | grep -i "ImageMagick" | head -n 1)
           if [ -z "$POLICY_FILE" ]; then
             echo "❌ CRITICAL: Could not find ImageMagick's policy.xml file!"
@@ -108,8 +128,14 @@ jobs:
           sudo sed -i 's/<policy domain="resource" name="height" value=".*"\/>/<policy domain="resource" name="height" value="16384"\/>/' "$POLICY_FILE"
 
           echo "--- Installing Python packages ---"
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ "${VENV_CACHE_HIT:-}" != "true" ]; then
+            python -m venv ~/.venv-dypol
+            ~/.venv-dypol/bin/python -m pip install --upgrade pip
+            ~/.venv-dypol/bin/pip install -r requirements.txt
+          else
+            echo "♻️ Restored cached virtualenv; pip install skipped."
+          fi
+          echo "$HOME/.venv-dypol/bin" >> "$GITHUB_PATH"
           echo "✅ Dependencies installed."
 
       - name: 🔑 Restore YouTube OAuth JSON only for an explicitly permitted upload phase
@@ -200,7 +226,12 @@ jobs:
           DYPOL_TITLE_OVERRIDE: ${{ inputs.title_override || '' }}
           DYPOL_DESCRIPTION_OVERRIDE: ${{ inputs.description_override || '' }}
           YOUTUBE_PRIVACY_STATUS: ${{ inputs.privacy || 'private' }}
-        run: python main.py
+          REVIEWER_FEEDBACK: ${{ inputs.reviewer_feedback || '' }}
+          # Unbuffered output: per-stage timings in the log line up with real time.
+          PYTHONUNBUFFERED: '1'
+        run: |
+          set -o pipefail
+          python main.py 2>&1 | tee "$RUNNER_TEMP/dypol-run.log"
 
       - name: 📦 Save draft candidate for later approved publishing
         if: ${{ success() && inputs.phase != 'publish' }}
@@ -208,7 +239,8 @@ jobs:
         with:
           name: dypol-candidate-${{ inputs.job_id || github.run_id }}
           path: output/
-          retention-days: 14
+          # Drafts are ~100-120 MB; 3 days keeps the free 500 MB Actions storage from filling.
+          retention-days: 3
           if-no-files-found: error
 
       - name: 🗂️ Upload verified DYPOL run result backup
@@ -226,6 +258,8 @@ jobs:
         with:
           name: audio-debug-files
           path: output/*.wav
+          retention-days: 3
+          if-no-files-found: ignore
 
       - name: 🎥 Upload Final Video for Debugging
         if: always()
@@ -233,6 +267,8 @@ jobs:
         with:
           name: final-videos
           path: output/*.mp4
+          retention-days: 3
+          if-no-files-found: ignore
 
       - name: 🎞️ Generate demo GIF from latest video
         if: steps.production-run.outcome == 'success'
@@ -271,4 +307,29 @@ jobs:
           git commit -m "dypol: save plan and verified result for run $RUN_ID"
           git fetch origin "$BRANCH_NAME"
           git rebase "origin/$BRANCH_NAME"
+          git push origin "HEAD:$BRANCH_NAME"
+
+      # Failed publish: record why (failure_category + redacted log tail) and keep any
+      # video that was already uploaded, so the console never re-uploads it.
+      - name: 🧾 Record failed publish result for the console
+        if: ${{ failure() && (inputs.phase == 'publish' || inputs.phase == 'full') }}
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+          RUN_ID: ${{ github.run_id }}
+          JOB_ID: ${{ inputs.job_id || github.run_id }}
+          PHASE: ${{ inputs.phase }}
+        run: |
+          set -euo pipefail
+          python3 scripts/report_failure.py \
+            --job-id "$JOB_ID" --run-id "$RUN_ID" --phase "$PHASE" \
+            --log "$RUNNER_TEMP/dypol-run.log" \
+            --partial output/upload_results.json \
+            --default-category publish \
+            --out "dypol-results/$RUN_ID.json"
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add "dypol-results/$RUN_ID.json"
+          git commit -m "dypol: failed publish result for run $RUN_ID" || exit 0
+          git fetch origin "$BRANCH_NAME"
+          git rebase --autostash "origin/$BRANCH_NAME"
           git push origin "HEAD:$BRANCH_NAME"
