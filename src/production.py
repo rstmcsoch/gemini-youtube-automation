@@ -8,6 +8,7 @@ from pathlib import Path
 
 from src import explainer as ex
 from src import storyboard as sb
+from src import captions as caps
 
 LONG_SIZE = (1920, 1080)
 SHORT_SIZE = (1080, 1920)
@@ -19,6 +20,15 @@ MANIFEST_FIELDS = ("provider", "source_url", "asset_id", "license", "license_url
 
 def _log(message):
     print(f"🎬 {message}", flush=True)
+
+
+def _write_captions(words, path):
+    """Write the YouTube caption file; a failure here never stops the render."""
+    try:
+        return caps.write_srt(words, path)
+    except Exception as exc:  # noqa: BLE001
+        _log(f"WARNING: caption file not written ({path}): {exc}")
+        return None
 
 
 def _cleanup(narration, audio, shot_assets):
@@ -186,7 +196,7 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
     if gaps:
         raise RuntimeError(f"Timeline has uncovered frames (would render black): {gaps[:5]}")
 
-    per_slide_assets, bullet_times = [], []
+    per_slide_assets, bullet_times, caption_segments = [], [], []
     for sl, slide, path in zip(timeline["slides"], slides, narration_paths):
         n_shots = len(sl["shots"])
         terms = sb.topic_terms(slide.get("visual_queries", []), slide.get("bullets", []), *lesson_terms)
@@ -201,6 +211,7 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
         speech = ex.audio_duration(path)
         words = sb.estimate_word_timings(slide.get("content", ""), speech, ex.detect_speech_regions(path, speech))
         bullet_times.append(sb.bullet_reveal_times(slide.get("bullets", []), words, sl["end"] - sl["start"]))
+        caption_segments.append((sl["start"], words))
     shot_assets, manifest = _assign(timeline, per_slide_assets, LONG_SIZE, out_dir, "long")
 
     audio = ex.mix_music_and_normalize(narration, out_dir / "audio_long_final.wav")
@@ -215,8 +226,9 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
     storyboard = {"timeline": timeline, "bullet_times": bullet_times,
                   "slides": [{k: s.get(k) for k in ("title", "bullets", "visual_queries")} for s in slides]}
     (out_dir / "storyboard.json").write_text(json.dumps(storyboard, indent=2), encoding="utf-8")
+    captions_path = _write_captions(caps.segments_to_words(caption_segments), out_dir / "captions_long.srt")
     _cleanup(narration, audio, shot_assets)
-    return {"manifest": manifest, "timeline": timeline, "judge": judge_summary,
+    return {"manifest": manifest, "timeline": timeline, "judge": judge_summary, "captions_path": captions_path,
             "own_assets": [a for assets in per_slide_assets for a in assets
                            if a.get("reusable") and _is_real(a)],
             # Stock stills survive cleanup; the Short may reuse them before any gradient.
@@ -311,7 +323,9 @@ def produce_short(script, voice_path, out_dir, out_path, gather, used, spec, own
     judge_summary = _judge_finish("short", shot_assets, _short_line, manifest,
                                   spec.get("video_title", ""), out_dir)
     (out_dir / "captions.json").write_text(json.dumps(words, indent=1), encoding="utf-8")
+    captions_path = _write_captions(words, out_dir / "captions_short.srt")
     _cleanup(narration, audio, shot_assets)
     for leftover in out_dir.glob("short_voice*"):
         leftover.unlink(missing_ok=True)
-    return {"manifest": manifest, "timeline": timeline, "words": words, "judge": judge_summary}
+    return {"manifest": manifest, "timeline": timeline, "words": words, "judge": judge_summary,
+            "captions_path": captions_path}

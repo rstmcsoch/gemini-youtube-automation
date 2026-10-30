@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from google.oauth2.credentials import Credentials
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -15,7 +16,13 @@ from dypol_control import (
 
 CLIENT_SECRETS_FILE = Path("client_secrets.json")
 CREDENTIALS_FILE = Path("credentials.json")
-YOUTUBE_UPLOAD_SCOPE = ["https://www.googleapis.com/auth/youtube.upload"]
+YOUTUBE_UPLOAD_SCOPE_URL = "https://www.googleapis.com/auth/youtube.upload"
+YOUTUBE_FORCE_SSL_SCOPE_URL = "https://www.googleapis.com/auth/youtube.force-ssl"
+# The stored refresh token was granted both scopes; force-ssl is what captions.insert needs.
+YOUTUBE_SCOPES = [YOUTUBE_UPLOAD_SCOPE_URL, YOUTUBE_FORCE_SSL_SCOPE_URL]
+YOUTUBE_UPLOAD_SCOPE = [YOUTUBE_UPLOAD_SCOPE_URL]  # fallback for an upload-only token
+CAPTION_LANGUAGE = "en"
+CAPTION_NAME = "English"
 
 
 def sanitize_title(title, max_length=100):
@@ -35,33 +42,81 @@ def get_privacy_status():
     return visibility
 
 
-def get_authenticated_service():
+def _load_credentials(scopes):
+    """Credentials from the saved refresh token, asking for ``scopes`` on refresh.
+
+    Never re-consents: the refresh request only narrows to scopes the token
+    already holds, so no browser/consent screen is involved."""
+    credentials = Credentials.from_authorized_user_file(str(CREDENTIALS_FILE), scopes)
+    if not credentials.valid:
+        # A token can be invalid even if its expiry is absent or malformed.
+        # Refresh with the saved refresh token instead of an interactive flow.
+        if not credentials.refresh_token:
+            return None
+        credentials.refresh(Request())
+    return credentials
+
+
+def get_authenticated_service(scopes=None):
+    """Return (youtube_service, granted_scopes).
+
+    Requests upload + force-ssl. If the stored token turns out to be upload-only
+    (refresh fails with invalid_scope), it falls back to upload-only so the video
+    still uploads; captions are then skipped with a warning."""
+    scopes = list(scopes or YOUTUBE_SCOPES)
     credentials = None
     if CREDENTIALS_FILE.exists():
-        credentials = Credentials.from_authorized_user_file(str(CREDENTIALS_FILE), YOUTUBE_UPLOAD_SCOPE)
-
-    if not credentials or not credentials.valid:
-        # A token can be invalid even if its expiry is absent or malformed.
-        # Prefer refreshing with the saved refresh token instead of opening an
-        # interactive OAuth flow inside a headless GitHub Actions runner.
-        if credentials and credentials.refresh_token:
-            credentials.refresh(Request())
-        else:
-            if not CLIENT_SECRETS_FILE.exists():
-                raise FileNotFoundError("client_secrets.json is missing; configure YouTube OAuth first.")
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(CLIENT_SECRETS_FILE), scopes=YOUTUBE_UPLOAD_SCOPE
-            )
-            credentials = flow.run_local_server(port=0)
+        try:
+            credentials = _load_credentials(scopes)
+        except RefreshError as exc:
+            if "invalid_scope" in str(exc) and set(scopes) != set(YOUTUBE_UPLOAD_SCOPE):
+                print("WARNING: stored YouTube token lacks youtube.force-ssl; "
+                      "uploading with youtube.upload only (captions will be skipped).")
+                scopes = list(YOUTUBE_UPLOAD_SCOPE)
+                credentials = _load_credentials(scopes)
+            else:
+                raise
+        if credentials is not None:
+            CREDENTIALS_FILE.write_text(credentials.to_json(), encoding="utf-8")
+    if credentials is None:
+        if not CLIENT_SECRETS_FILE.exists():
+            raise FileNotFoundError("client_secrets.json is missing; configure YouTube OAuth first.")
+        flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRETS_FILE), scopes=scopes)
+        credentials = flow.run_local_server(port=0)
         CREDENTIALS_FILE.write_text(credentials.to_json(), encoding="utf-8")
-    return build("youtube", "v3", credentials=credentials)
+    granted = list(getattr(credentials, "granted_scopes", None) or credentials.scopes or scopes)
+    return build("youtube", "v3", credentials=credentials), granted
+
+
+def upload_captions(youtube, video_id, captions_path, language=CAPTION_LANGUAGE, name=CAPTION_NAME):
+    """Attach an SRT/VTT caption track to an uploaded video. Never raises.
+
+    Returns the caption track id, or None (with a logged warning) on any failure."""
+    path = Path(captions_path) if captions_path else None
+    if not path or not path.is_file() or path.stat().st_size == 0:
+        print(f"WARNING: no caption file for video {video_id}; captions skipped.")
+        return None
+    try:
+        body = {"snippet": {"videoId": video_id, "language": language, "name": name, "isDraft": False}}
+        media = MediaFileUpload(str(path), mimetype="application/octet-stream", resumable=False)
+        response = youtube.captions().insert(part="snippet", body=body, media_body=media).execute()
+        caption_id = (response or {}).get("id")
+        if not caption_id:
+            print(f"WARNING: caption upload for video {video_id} returned no id.")
+            return None
+        print(f"Captions uploaded for video {video_id}: {path.name} (track {caption_id})")
+        return caption_id
+    except Exception as exc:  # noqa: BLE001 - captions must never fail the publish
+        print(f"WARNING: caption upload failed for video {video_id}: {exc}")
+        return None
 
 
 def upload_to_youtube(video_path, title, description, tags, thumbnail_path=None, kind="video",
-                      visual_manifest=None):
+                      visual_manifest=None, captions_path=None):
     """Upload one video and return its ID, URL, title, visibility and kind.
 
-    ``visual_manifest`` is this video's visual manifest; when it includes an
+    ``captions_path`` (SRT/VTT) is attached after upload; a caption failure only
+    logs a warning. ``visual_manifest`` is this video's visual manifest; when it includes an
     AI-generated asset (FLUX / Cloudflare / AI-generated) the upload declares
     status.containsSyntheticMedia=True, unless YOUTUBE_CONTAINS_SYNTHETIC_MEDIA
     (auto|true|false, default auto) forces the value."""
@@ -75,7 +130,8 @@ def upload_to_youtube(video_path, title, description, tags, thumbnail_path=None,
     body = build_insert_body(safe_title, description, tags, visibility, contains_synthetic_media)
     verify_insert_body(body, visibility)
     print(f"containsSyntheticMedia={contains_synthetic_media} ({kind})")
-    youtube = get_authenticated_service()
+    service = get_authenticated_service()
+    youtube, granted_scopes = service if isinstance(service, tuple) else (service, list(YOUTUBE_SCOPES))
     media = MediaFileUpload(str(video_path), chunksize=-1, resumable=True)
     request = youtube.videos().insert(part=",".join(body.keys()), body=body, media_body=media)
 
@@ -101,6 +157,13 @@ def upload_to_youtube(video_path, title, description, tags, thumbnail_path=None,
             # Thumbnail failure does not undo the successful video upload.
             print(f"WARNING: thumbnail upload failed for video {video_id}: {exc}")
 
+    caption_id = None
+    if captions_path:
+        if YOUTUBE_FORCE_SSL_SCOPE_URL in granted_scopes:
+            caption_id = upload_captions(youtube, video_id, captions_path)
+        else:
+            print(f"WARNING: captions skipped for video {video_id}: token lacks youtube.force-ssl.")
+
     print(f"Video uploaded with visibility={visibility}; ID={video_id}")
     return {
         "youtube_id": video_id,
@@ -110,4 +173,6 @@ def upload_to_youtube(video_path, title, description, tags, thumbnail_path=None,
         "kind": kind,
         "thumbnail_uploaded": thumbnail_uploaded,
         "contains_synthetic_media": contains_synthetic_media,
+        "captions_uploaded": bool(caption_id),
+        "caption_id": caption_id or "",
     }

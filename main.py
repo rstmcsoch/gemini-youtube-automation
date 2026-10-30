@@ -199,6 +199,7 @@ def generate_lesson_assets(lesson):
                 "kind": "long",
                 "path": str(long_video_path),
                 "thumb_path": str(long_thumb_path),
+                "captions_path": long_result.get("captions_path") or "",
                 "title": lesson["title"],
                 "description": long_desc,
                 "tags": long_tags,
@@ -207,6 +208,7 @@ def generate_lesson_assets(lesson):
                 "kind": "short",
                 "path": str(short_video_path),
                 "thumb_path": str(short_thumb_path),
+                "captions_path": short_result.get("captions_path") or "",
                 "title": short_title,
                 "description": short_desc,
                 "tags": "AI,Shorts,TechTip",
@@ -234,6 +236,7 @@ def upload_candidate_asset(asset, policy):
         asset.get("thumb_path"),
         kind=kind,
         visual_manifest=asset.get("visual_manifest"),
+        captions_path=asset.get("captions_path") or None,
     )
 
 

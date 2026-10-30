@@ -390,6 +390,7 @@ def record_upload_results(
             or f"https://youtu.be/{v.get('youtube_id') or v.get('id') or ''}",
             "title": v.get("title", ""),
             "visibility": v.get("visibility", visibility),
+            **({"captions_uploaded": bool(v["captions_uploaded"])} if "captions_uploaded" in v else {}),
         })
     primary = next((v for v in vids if v["kind"] == "long"), vids[0] if vids else {})
     # A draft (no uploads) keeps its honest status — only an *attempted* upload
