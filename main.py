@@ -103,8 +103,10 @@ def generate_lesson_assets(lesson):
     long_video_path = OUTPUT_DIR / f"long_video_{unique_id}.mp4"
     print(f"🎥 Creating long-form video at: {long_video_path}")
     long_result = produce_long(all_slides, slide_audio_paths, slide_dir, long_video_path,
-                               gather_visuals, used_assets, lesson_terms=lesson_terms)
+                               gather_visuals, used_assets, lesson_terms=lesson_terms,
+                               video_title=lesson['title'])
     (slide_dir / "visual_manifest.json").write_text(json.dumps(long_result["manifest"], indent=2), encoding="utf-8")
+    (slide_dir / "visual_judge.json").write_text(json.dumps(long_result.get("judge") or {}, indent=2), encoding="utf-8")
 
     long_thumb_path = generate_visuals(
         output_dir=OUTPUT_DIR / f"thumbnails_long_{unique_id}",
@@ -128,13 +130,15 @@ def generate_lesson_assets(lesson):
     short_queries = sb.normalize_queries(lesson_content.get("short_visual_queries"),
                                          " ".join(q for s in body_slides for q in s["visual_queries"]))
     short_spec = {"visual_queries": short_queries, "image_prompt": intro_slide["image_prompt"],
-                  "terms": sb.topic_terms(short_queries, *lesson_terms)}
+                  "terms": sb.topic_terms(short_queries, *lesson_terms),
+                  "video_title": lesson['title'], "narration": short_script}
     short_video_path = OUTPUT_DIR / f"short_video_{unique_id}.mp4"
     print(f"🎥 Creating short video at: {short_video_path}")
     short_result = produce_short(short_script, short_voice, short_slide_dir, short_video_path,
                                  gather_visuals, used_assets, short_spec, long_result["own_assets"],
                                  fallback_assets=long_result.get("stock_assets", ()))
     (short_slide_dir / "visual_manifest.json").write_text(json.dumps(short_result["manifest"], indent=2), encoding="utf-8")
+    (short_slide_dir / "visual_judge.json").write_text(json.dumps(short_result.get("judge") or {}, indent=2), encoding="utf-8")
 
     short_thumb_path = generate_visuals(
         output_dir=OUTPUT_DIR / f"thumbnails_short_{unique_id}",
@@ -172,11 +176,22 @@ def generate_lesson_assets(lesson):
                 )
             except (OSError, ValueError):
                 visual_review_required = True
+    # AI visual judge: circuit open, caps hit, best-MARGINAL picks or contact-sheet flags
+    # make the candidate need review, exactly like the gradient cap does.
+    visual_judge = {"long": long_result.get("judge") or {"judge_status": "disabled"},
+                    "short": short_result.get("judge") or {"judge_status": "disabled"}}
+    judge_reasons = [f"{kind}: {reason}" for kind, summary in visual_judge.items()
+                     for reason in (summary.get("needs_review_reasons") or [])]
+    if judge_reasons:
+        visual_review_required = True
     return {
         "job_id": os.environ.get("DYPOL_JOB_ID", ""),
         "lesson_title": lesson["title"],
         "review_required": visual_review_required,
         "visual_manifest": visual_manifests,
+        "judge_status": visual_judge["long"].get("judge_status", "disabled"),
+        "visual_judge": visual_judge,
+        "visual_judge_review_reasons": judge_reasons,
         # Sources skipped this run after a quota/limit hit (e.g. FLUX daily neurons, Pixabay 429).
         "provider_limits": __import__("src.visuals", fromlist=["breaker_status"]).breaker_status(),
         "assets": [

@@ -44,7 +44,73 @@ def manifest_entry(asset, video, slide, shots, timeline):
                      "fallback_query", "borrowed"):
         if asset.get(optional) not in (None, "", []):
             entry[optional] = asset[optional]
+    entry["judge_status"] = _judge_status()
+    if asset.get("judge"):
+        entry["judge"] = dict(asset["judge"])
+        if asset["judge"].get("needs_review"):
+            entry["review_required"] = True
+            entry["review_reason"] = f"visual judge: {asset['judge'].get('review_reason', 'needs review')}"
     return entry
+
+
+# ---------------------------------------------------------------------------
+# Visual judge hooks (never raise; a missing/failed judge leaves today's behaviour)
+# ---------------------------------------------------------------------------
+
+def _get_judge():
+    try:
+        from src.visual_judge import get_judge
+        return get_judge()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _judge_status():
+    judge = _get_judge()
+    return judge.status if judge else "disabled"
+
+
+def _judge_begin(label):
+    judge = _get_judge()
+    if judge:
+        judge.begin_video(label)
+
+
+def _judge_finish(label, shot_assets, narration_for_shot, manifest, video_title, out_dir):
+    """Post-render contact-sheet check + per-video judge summary (flags review like the gradient cap)."""
+    judge = _get_judge()
+    if judge is None:
+        return {"judge_status": "disabled"}
+    try:
+        judge.begin_video(label)
+        tiles, seen = [], set()
+        for k, asset in enumerate(shot_assets):
+            if not asset or asset.get("kind") != "image" or not _is_real(asset):
+                continue  # contact sheets use stills only
+            path = asset.get("path", "")
+            if path in seen or not Path(path).exists():
+                continue
+            seen.add(path)
+            tiles.append((path, narration_for_shot(k), asset))
+        if judge.active and tiles:
+            result = judge.check_contact_sheet([(p, t) for p, t, _ in tiles], video_title, out_dir, label)
+            for bad in (result or {}).get("bad_shots", []):
+                n = bad["n"] - 1
+                if 0 <= n < len(tiles):
+                    name = Path(tiles[n][0]).name
+                    for entry in manifest:
+                        if entry.get("file") == name:
+                            entry["review_required"] = True
+                            entry["review_reason"] = f"visual judge contact sheet: {bad.get('reason', '')}".strip()
+            for sheet in Path(out_dir).glob(f"contact_sheet_{label}_*.jpg"):
+                sheet.unlink(missing_ok=True)
+        summary = judge.summary(label)
+    except Exception as exc:  # noqa: BLE001 - the judge must never block the pipeline
+        _log(f"{label}: visual judge summary failed ({exc}); continuing")
+        return {"judge_status": _judge_status(), "error": str(exc)[:200]}
+    if summary.get("needs_review"):
+        _log(f"{label}: visual judge needs review: {'; '.join(summary['needs_review_reasons'])}")
+    return summary
 
 
 def _is_real(asset):
@@ -107,8 +173,10 @@ def _assign(timeline, per_slide_assets, size, out_dir, label):
     return shot_assets, manifest
 
 
-def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesson_terms=()):
+def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesson_terms=(), video_title=None):
     """slides: normalized slide specs (title, content, bullets, visual_queries, image_prompt, kicker)."""
+    video_title = video_title or (slides[0].get("title", "") if slides else "")
+    _judge_begin("long")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     narration = out_dir / "narration_long.wav"
@@ -123,7 +191,8 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
         n_shots = len(sl["shots"])
         terms = sb.topic_terms(slide.get("visual_queries", []), slide.get("bullets", []), *lesson_terms)
         spec = {"visual_queries": slide.get("visual_queries"), "image_prompt": slide.get("image_prompt"),
-                "terms": terms}
+                "terms": terms, "video_title": video_title,
+                "narration": slide.get("content") or slide.get("title", "")}
         # Without FLUX, ask stock for more unique assets per slide (up to 6) instead of placeholders.
         count = sb.unique_visual_count(n_shots) if _flux_available() else min(n_shots, 6)
         assets = gather(spec, out_dir, count, used, orientation="landscape",
@@ -138,11 +207,16 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
     overlay = ex.long_overlay(timeline, slides, bullet_times, LONG_SIZE)
     _log(f"rendering long video: {timeline['total']:.1f}s, {len(timeline['shots'])} shots")
     ex.render(timeline, shot_assets, audio, out_path, LONG_SIZE, overlay, progress=_log)
+    judge_summary = _judge_finish(
+        "long", shot_assets,
+        lambda k: (slides[timeline["shots"][k]["slide"]].get("content")
+                   or slides[timeline["shots"][k]["slide"]].get("title", "")),
+        manifest, video_title, out_dir)
     storyboard = {"timeline": timeline, "bullet_times": bullet_times,
                   "slides": [{k: s.get(k) for k in ("title", "bullets", "visual_queries")} for s in slides]}
     (out_dir / "storyboard.json").write_text(json.dumps(storyboard, indent=2), encoding="utf-8")
     _cleanup(narration, audio, shot_assets)
-    return {"manifest": manifest, "timeline": timeline,
+    return {"manifest": manifest, "timeline": timeline, "judge": judge_summary,
             "own_assets": [a for assets in per_slide_assets for a in assets
                            if a.get("reusable") and _is_real(a)],
             # Stock stills survive cleanup; the Short may reuse them before any gradient.
@@ -181,6 +255,9 @@ def fit_short_audio(tts_fn, script, cta, work_dir):
 
 def produce_short(script, voice_path, out_dir, out_path, gather, used, spec, own_assets=(),
                   fallback_assets=()):
+    _judge_begin("short")
+    spec = dict(spec or {})
+    spec.setdefault("narration", script)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     narration = out_dir / "narration_short.wav"
@@ -226,8 +303,15 @@ def produce_short(script, voice_path, out_dir, out_path, gather, used, spec, own
     overlay = ex.short_overlay(words, SHORT_SIZE)
     _log(f"rendering Short: {total:.1f}s, {n_shots} shots")
     ex.render(timeline, shot_assets, audio, out_path, SHORT_SIZE, overlay)
+
+    def _short_line(k):
+        shot = timeline["shots"][k]
+        said = [w for w, a, b in words if b > shot["start"] and a < shot["end"]]
+        return " ".join(said) or script
+    judge_summary = _judge_finish("short", shot_assets, _short_line, manifest,
+                                  spec.get("video_title", ""), out_dir)
     (out_dir / "captions.json").write_text(json.dumps(words, indent=1), encoding="utf-8")
     _cleanup(narration, audio, shot_assets)
     for leftover in out_dir.glob("short_voice*"):
         leftover.unlink(missing_ok=True)
-    return {"manifest": manifest, "timeline": timeline, "words": words}
+    return {"manifest": manifest, "timeline": timeline, "words": words, "judge": judge_summary}

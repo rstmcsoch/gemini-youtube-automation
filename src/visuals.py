@@ -438,11 +438,28 @@ def _probe_duration(path):
         return 0.0
 
 
-def _stock_still(query, terms, out_dir, used, orientation, label):
+def _judge():
+    """The run's visual judge, or None when unavailable (judge never blocks the pipeline)."""
+    try:
+        from src.visual_judge import get_judge
+        judge = get_judge()
+        return judge if judge.active else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _judge_note(asset, verdict, needs_review=False, reason=""):
+    from src.visual_judge import verdict_fields
+    record = verdict_fields(verdict, needs_review, reason)
+    if record:
+        asset["judge"] = record
+    return asset
+
+
+def _ranked_still_hits(query, terms, used, orientation):
     min_w, min_h = (1280, 720) if orientation == "horizontal" else (720, 1280)
-    hits = pixabay_still_hits(query, orientation)
     ranked = []
-    for hit in hits:
+    for hit in pixabay_still_hits(query, orientation):
         ok, overlap, _ = sb.tag_relevance(hit.get("tags", ""), terms)
         if not ok or f"pixabay:{hit.get('id')}" in used["ids"]:
             continue
@@ -450,32 +467,98 @@ def _stock_still(query, terms, out_dir, used, orientation, label):
             continue
         ranked.append((len(overlap), hit, overlap))
     ranked.sort(key=lambda item: -item[0])
-    for _, hit, overlap in ranked[:4]:
-        path = Path(out_dir) / f"{label}_px_{hit.get('id')}.png"
-        try:
-            meta = _download_candidate({"download_url": hit.get("largeImageURL") or hit.get("webformatURL")}, path)
-        except (requests.RequestException, OSError, ValueError):
+    return [(hit, overlap) for _, hit, overlap in ranked]
+
+
+def _fetch_still(hit, out_dir, label, used):
+    """Download + dedupe (mechanical). Returns (path, meta) without registering it as used."""
+    path = Path(out_dir) / f"{label}_px_{hit.get('id')}.png"
+    try:
+        meta = _download_candidate({"download_url": hit.get("largeImageURL") or hit.get("webformatURL")}, path)
+    except (requests.RequestException, OSError, ValueError):
+        path.unlink(missing_ok=True)
+        return None
+    if meta["sha256"] in used["hashes"]:
+        path.unlink(missing_ok=True)
+        return None
+    return path, meta
+
+
+def _still_asset(hit, meta, path, query, overlap, used):
+    used["hashes"].add(meta["sha256"])
+    used["ids"].add(f"pixabay:{hit.get('id')}")
+    return {
+        "kind": "image", "provider": "pixabay", "source_url": hit.get("pageURL", ""),
+        "asset_id": str(hit.get("id", "")), "license": PIXABAY_LICENSE, "license_url": PIXABAY_LICENSE_URL,
+        "sha256": meta["sha256"], "retrieved_at": _now(), "tags": hit.get("tags", ""),
+        "query": query, "matched_terms": sorted(overlap), "width": meta["width"], "height": meta["height"],
+        "path": str(path), "reusable": False, "third_party": True,
+    }
+
+
+def _stock_still(query, terms, out_dir, used, orientation, label, ctx=None, judge_limit=None, broaden=True,
+                 jstate=None):
+    ctx = ctx or {}
+    judge = _judge()
+    if judge is None:
+        # Judge disabled/unavailable: exactly the mechanical behaviour.
+        for hit, overlap in _ranked_still_hits(query, terms, used, orientation)[:4]:
+            fetched = _fetch_still(hit, out_dir, label, used)
+            if fetched:
+                return _still_asset(hit, fetched[1], fetched[0], query, overlap, used)
+        return None
+    from src.visual_judge import ShotJudging, CANDIDATES_PER_SHOT, BROADENED_CANDIDATES, broaden_query
+    shot = ShotJudging(judge, judge_limit or CANDIDATES_PER_SHOT)
+    tried = set()
+
+    def attempt(q, extra):
+        shot.extend(extra)
+        for hit, overlap in _ranked_still_hits(q, terms, used, orientation):
+            if not shot.can_judge_more() and shot.active:
+                return None
+            key = f"pixabay:{hit.get('id')}"
+            if key in tried:
+                continue
+            tried.add(key)
+            if judge.is_rejected(key, q):
+                continue  # rejection memory: skip before downloading
+            fetched = _fetch_still(hit, out_dir, label, used)
+            if not fetched:
+                continue
+            path, meta = fetched
+            verdict = judge.judge_image(path, ctx.get("video_title", ""), ctx.get("narration", ""), q, key)
+            outcome = shot.consider(verdict, (hit, meta, path, overlap, q))
+            if outcome in ("accept", "unjudged"):
+                return _judge_note(_still_asset(hit, meta, path, q, overlap, used), verdict)
+            if outcome == "keep_marginal":
+                if shot.displaced:
+                    Path(shot.displaced[2]).unlink(missing_ok=True)
+                continue
             path.unlink(missing_ok=True)
-            continue
-        if meta["sha256"] in used["hashes"]:
-            path.unlink(missing_ok=True)
-            continue
-        used["hashes"].add(meta["sha256"])
-        used["ids"].add(f"pixabay:{hit.get('id')}")
-        return {
-            "kind": "image", "provider": "pixabay", "source_url": hit.get("pageURL", ""),
-            "asset_id": str(hit.get("id", "")), "license": PIXABAY_LICENSE, "license_url": PIXABAY_LICENSE_URL,
-            "sha256": meta["sha256"], "retrieved_at": _now(), "tags": hit.get("tags", ""),
-            "query": query, "matched_terms": sorted(overlap), "width": meta["width"], "height": meta["height"],
-            "path": str(path), "reusable": False, "third_party": True,
-        }
+        return None
+
+    asset = attempt(query, 0)
+    broad = broaden_query(query) if broaden else None
+    if asset is None and broad and shot.active:
+        asset = attempt(broad, BROADENED_CANDIDATES)
+    if asset is not None:
+        if shot.marginal:
+            Path(shot.marginal[1][2]).unlink(missing_ok=True)
+        return asset
+    if shot.marginal:
+        verdict, (hit, meta, path, overlap, q) = shot.marginal
+        if meta["sha256"] not in used["hashes"]:
+            return _judge_note(_still_asset(hit, meta, path, q, overlap, used), verdict, True,
+                               f"best MARGINAL still after {shot.judged} judged candidates")
+        Path(path).unlink(missing_ok=True)
+    if jstate is not None and shot.judged:
+        jstate["rejected"] = jstate.get("rejected", 0) + shot.judged
     return None
 
 
-def _stock_video(query, terms, out_dir, used, label, min_seconds=5):
-    hits = pixabay_video_hits(query)
+def _ranked_video_hits(query, terms, used, min_seconds):
     ranked = []
-    for hit in hits:
+    for hit in pixabay_video_hits(query):
         ok, overlap, _ = sb.tag_relevance(hit.get("tags", ""), terms)
         if not ok or f"pixabay-video:{hit.get('id')}" in used["ids"]:
             continue
@@ -491,29 +574,96 @@ def _stock_video(query, terms, out_dir, used, label, min_seconds=5):
         if rendition:
             ranked.append((len(overlap), hit, rendition, overlap))
     ranked.sort(key=lambda item: -item[0])
-    for _, hit, rendition, overlap in ranked[:3]:
-        path = Path(out_dir) / f"{label}_pxv_{hit.get('id')}.mp4"
-        try:
-            response = requests.get(rendition["url"], timeout=(8, 90))
-            response.raise_for_status()
-            path.write_bytes(response.content)
-        except (requests.RequestException, OSError):
+    return [(hit, rendition, overlap) for _, hit, rendition, overlap in ranked]
+
+
+def _fetch_video(hit, rendition, out_dir, label, used):
+    """Download + duration/dedupe checks (mechanical). Returns (path, duration, digest) or None."""
+    path = Path(out_dir) / f"{label}_pxv_{hit.get('id')}.mp4"
+    try:
+        response = requests.get(rendition["url"], timeout=(8, 90))
+        response.raise_for_status()
+        path.write_bytes(response.content)
+    except (requests.RequestException, OSError):
+        path.unlink(missing_ok=True)
+        return None
+    duration = _probe_duration(path)
+    digest = _sha256(path)
+    if duration < 2 or digest in used["hashes"]:
+        path.unlink(missing_ok=True)
+        return None
+    return path, duration, digest
+
+
+def _video_asset(hit, rendition, overlap, path, duration, digest, query, used):
+    used["hashes"].add(digest)
+    used["ids"].add(f"pixabay-video:{hit.get('id')}")
+    return {
+        "kind": "video", "provider": "pixabay_video", "source_url": hit.get("pageURL", ""),
+        "asset_id": str(hit.get("id", "")), "license": PIXABAY_LICENSE, "license_url": PIXABAY_LICENSE_URL,
+        "sha256": digest, "retrieved_at": _now(), "tags": hit.get("tags", ""), "query": query,
+        "matched_terms": sorted(overlap), "width": rendition.get("width"), "height": rendition.get("height"),
+        "duration": round(duration, 3), "path": str(path), "reusable": False, "third_party": True,
+    }
+
+
+def _stock_video(query, terms, out_dir, used, label, min_seconds=5, ctx=None, judge_limit=None, broaden=True,
+                 jstate=None):
+    ctx = ctx or {}
+    judge = _judge()
+    if judge is None:
+        for hit, rendition, overlap in _ranked_video_hits(query, terms, used, min_seconds)[:3]:
+            fetched = _fetch_video(hit, rendition, out_dir, label, used)
+            if fetched:
+                return _video_asset(hit, rendition, overlap, *fetched, query, used)
+        return None
+    from src.visual_judge import ShotJudging, CANDIDATES_PER_SHOT, BROADENED_CANDIDATES, broaden_query
+    shot = ShotJudging(judge, judge_limit or CANDIDATES_PER_SHOT)
+    tried = set()
+
+    def attempt(q, extra):
+        shot.extend(extra)
+        for hit, rendition, overlap in _ranked_video_hits(q, terms, used, min_seconds):
+            if not shot.can_judge_more() and shot.active:
+                return None
+            key = f"pixabay-video:{hit.get('id')}"
+            if key in tried:
+                continue
+            tried.add(key)
+            if judge.is_rejected(key, q):
+                continue
+            fetched = _fetch_video(hit, rendition, out_dir, label, used)
+            if not fetched:
+                continue
+            path = fetched[0]
+            # Clips: judged on the 50 % frame; one 25 % retry only for low_quality.
+            verdict = judge.judge_clip(path, ctx.get("video_title", ""), ctx.get("narration", ""), q, key)
+            outcome = shot.consider(verdict, (hit, rendition, overlap, fetched, q))
+            if outcome in ("accept", "unjudged"):
+                return _judge_note(_video_asset(hit, rendition, overlap, *fetched, q, used), verdict)
+            if outcome == "keep_marginal":
+                if shot.displaced:
+                    Path(shot.displaced[3][0]).unlink(missing_ok=True)
+                continue
             path.unlink(missing_ok=True)
-            continue
-        duration = _probe_duration(path)
-        digest = _sha256(path)
-        if duration < 2 or digest in used["hashes"]:
-            path.unlink(missing_ok=True)
-            continue
-        used["hashes"].add(digest)
-        used["ids"].add(f"pixabay-video:{hit.get('id')}")
-        return {
-            "kind": "video", "provider": "pixabay_video", "source_url": hit.get("pageURL", ""),
-            "asset_id": str(hit.get("id", "")), "license": PIXABAY_LICENSE, "license_url": PIXABAY_LICENSE_URL,
-            "sha256": digest, "retrieved_at": _now(), "tags": hit.get("tags", ""), "query": query,
-            "matched_terms": sorted(overlap), "width": rendition.get("width"), "height": rendition.get("height"),
-            "duration": round(duration, 3), "path": str(path), "reusable": False, "third_party": True,
-        }
+        return None
+
+    asset = attempt(query, 0)
+    broad = broaden_query(query) if broaden else None
+    if asset is None and broad and shot.active:
+        asset = attempt(broad, BROADENED_CANDIDATES)
+    if asset is not None:
+        if shot.marginal:
+            Path(shot.marginal[1][3][0]).unlink(missing_ok=True)
+        return asset
+    if shot.marginal:
+        verdict, (hit, rendition, overlap, fetched, q) = shot.marginal
+        if fetched[2] not in used["hashes"]:
+            return _judge_note(_video_asset(hit, rendition, overlap, *fetched, q, used), verdict, True,
+                               f"best MARGINAL clip after {shot.judged} judged candidates")
+        Path(fetched[0]).unlink(missing_ok=True)
+    if jstate is not None and shot.judged:
+        jstate["rejected"] = jstate.get("rejected", 0) + shot.judged
     return None
 
 
@@ -598,10 +748,16 @@ _FLUX_VARIANTS = ["wide establishing shot", "close-up detail shot", "conceptual 
                   "overhead perspective"]
 
 
-def _stock_attempt(kind, query, terms, out_dir, used, px_orientation, label):
+def _stock_attempt(kind, query, terms, out_dir, used, px_orientation, label, ctx=None, judge_limit=None,
+                   broaden=True, jstate=None):
     if kind == "video":
-        return _stock_video(query, terms, out_dir, used, label)
-    return _stock_still(query, terms, out_dir, used, px_orientation, label)
+        return _stock_video(query, terms, out_dir, used, label, ctx=ctx, judge_limit=judge_limit,
+                            broaden=broaden, jstate=jstate)
+    return _stock_still(query, terms, out_dir, used, px_orientation, label, ctx=ctx, judge_limit=judge_limit,
+                        broaden=broaden, jstate=jstate)
+
+
+WIDENING_JUDGE_LIMIT = 2  # widening queries: judge at most 2 candidates each, no broadened re-fetch
 
 
 def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s",
@@ -636,16 +792,19 @@ def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s
         slots[-1] = "flux"  # at least one reusable own visual per slide
     stock_kinds = [k for k, ok in (("video", allow_video), ("still", allow_still)) if ok]
     broad = sb.fallback_queries(terms, seed=seed)
+    ctx = {"video_title": spec.get("video_title", ""), "narration": spec.get("narration", "")}
     assets, flux_n = [], 0
     for index, slot in enumerate(slots):
         query = queries[index % len(queries)]
         asset = None
+        jstate = {}
         sub = f"{label}_{index}"
         order = {"video": ["video", "still", "flux"], "still": ["still", "flux"], "flux": ["flux", "still"]}[slot]
         for provider in order:
             if provider in ("video", "still"):
                 if (provider == "video" and allow_video) or (provider == "still" and allow_still):
-                    asset = _stock_attempt(provider, query, terms, out_dir, used, px_orientation, sub)
+                    asset = _stock_attempt(provider, query, terms, out_dir, used, px_orientation, sub,
+                                           ctx=ctx, jstate=jstate)
             elif provider == "flux" and flux_available():
                 variant = _FLUX_VARIANTS[flux_n % len(_FLUX_VARIANTS)]
                 asset = flux_generate(f"{spec.get('image_prompt') or query}, {variant}",
@@ -670,7 +829,9 @@ def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s
             extra += [(q, terms | sb.topic_terms(q)) for q in broad]
             for q, q_terms in extra:
                 for kind in kinds:
-                    asset = _stock_attempt(kind, q, q_terms, out_dir, used, px_orientation, sub)
+                    asset = _stock_attempt(kind, q, q_terms, out_dir, used, px_orientation, sub,
+                                           ctx=ctx, judge_limit=WIDENING_JUDGE_LIMIT, broaden=False,
+                                           jstate=jstate)
                     if asset:
                         asset["fallback_query"] = True
                         break
@@ -682,5 +843,14 @@ def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s
             size = (1920, 1080) if orientation == "landscape" else (1080, 1920)
             asset = generated_graphic(out_dir / f"{sub}_graphic.png", size, seed=seed * 7 + index)
         asset["query"] = asset.get("query", query)
+        if jstate.get("rejected") and (asset.get("judge") or {}).get("decision") != "PASS" \
+                and not (asset.get("judge") or {}).get("needs_review"):
+            # The judge rejected every stock candidate for this slot; whatever filled it
+            # (FLUX, a widened query, a graphic) was not approved by the judge.
+            judge = dict(asset.get("judge") or {"decision": "not_judged"})
+            judge.update({"needs_review": True,
+                          "review_reason": f"judge rejected all {jstate['rejected']} stock candidates; "
+                                           f"used {asset.get('provider')} fallback"})
+            asset["judge"] = judge
         assets.append(asset)
     return assets
