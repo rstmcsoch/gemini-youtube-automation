@@ -16,56 +16,142 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from pathlib import Path
 from pydub import AudioSegment
 
-# Gemini text generation fallback: 503/429 responses are transient service or capacity
-# conditions. Try a small, documented model cascade instead of failing the entire job.
-def _generate_text_with_fallback(client, prompt, task_name="text generation"):
+# Gemini text generation resilience.
+#
+# 5xx / 429 / "Server disconnected" / timeouts are transient service or capacity
+# conditions. Each round tries the primary model and then each fallback model; if
+# the whole round fails transiently we back off (10 s, 30 s, 60 s by default) and
+# run another round. Only after every round fails do we raise LLMUnavailableError,
+# which main.py reports as DYPOL_FAILURE_CATEGORY=llm_unavailable.
+
+DEFAULT_RETRY_DELAYS = (10, 30, 60)
+REVIEWER_FEEDBACK_MAX_CHARS = 1500
+_TRANSIENT_CODES = (408, 429, 500, 502, 503, 504)
+_TRANSIENT_TOKENS = (
+    "429", "500", "502", "503", "504", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "OVERLOADED",
+    "INTERNAL SERVER ERROR", "INTERNAL", "TIMED OUT", "TIMEOUT", "DEADLINE_EXCEEDED",
+    "DISCONNECTED", "CONNECTION", "NETWORK", "RESET BY PEER", "EOF OCCURRED", "BAD GATEWAY",
+)
+_TRANSIENT_TYPES = ("RemoteProtocolError", "ConnectError", "ReadTimeout", "ConnectTimeout", "ReadError",
+                    "ConnectionError", "ServerError", "WriteError", "PoolTimeout", "TimeoutException",
+                    "ServerDisconnectedError", "ClientConnectorError", "TimeoutError", "EmptyLLMResponse")
+_MISSING_MODEL_TOKENS = ("NOT_FOUND", "404", "IS NOT FOUND", "NOT SUPPORTED FOR GENERATECONTENT")
+
+_sleep = time.sleep  # patched in tests
+
+
+class EmptyLLMResponse(RuntimeError):
+    """Gemini answered without text (treated as transient)."""
+
+
+class LLMUnavailableError(RuntimeError):
+    """Every Gemini model failed with transient errors after all retry rounds."""
+
+    failure_category = "llm_unavailable"
+
+
+def _error_code(exc):
+    for attr in ("code", "status_code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    return value if isinstance(value, int) else None
+
+
+def is_transient_llm_error(exc):
+    code = _error_code(exc)
+    if code in _TRANSIENT_CODES:
+        return True
+    if code is not None and 400 <= code < 500:
+        return False
+    message = str(exc).upper()
+    return (any(token in message for token in _TRANSIENT_TOKENS)
+            or type(exc).__name__ in _TRANSIENT_TYPES
+            or isinstance(exc, (ConnectionError, TimeoutError)))
+
+
+def _is_missing_model(exc):
+    code = _error_code(exc)
+    message = str(exc).upper()
+    return code == 404 or (code is None and any(token in message for token in _MISSING_MODEL_TOKENS))
+
+
+def _retry_delays():
+    raw = os.environ.get("GEMINI_RETRY_DELAYS", "")
+    if not raw.strip():
+        return DEFAULT_RETRY_DELAYS
+    try:
+        return tuple(max(0.0, float(v)) for v in raw.split(",") if v.strip())
+    except ValueError:
+        return DEFAULT_RETRY_DELAYS
+
+
+def _text_models():
     primary = (os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash").strip()
     configured_fallbacks = os.environ.get(
         "GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.5-flash-lite"
     )
-    model_names = [primary] + [
-        item.strip() for item in configured_fallbacks.split(",") if item.strip()
-    ]
-    # Keep order stable and avoid calling the same model twice.
-    model_names = list(dict.fromkeys(model_names))
-    # One more attempt on the primary after the fallbacks (network blips are common).
-    model_names.append(model_names[0])
+    names = [primary] + [item.strip() for item in configured_fallbacks.split(",") if item.strip()]
+    return list(dict.fromkeys(names))  # stable order, no duplicates
+
+
+def _generate_text_with_fallback(client, prompt, task_name="text generation"):
+    models = _text_models()
+    delays = _retry_delays()
     last_error = None
+    attempts = 0
+    for round_index in range(len(delays) + 1):
+        if round_index:
+            wait = delays[round_index - 1]
+            print(f"⏳ {task_name}: all Gemini models unavailable; retry round {round_index + 1} "
+                  f"in {wait:.0f}s.", flush=True)
+            _sleep(wait)
+        for model_name in list(models):
+            attempts += 1
+            try:
+                response = client.models.generate_content(model=model_name, contents=prompt)
+                if not getattr(response, "text", None):
+                    raise EmptyLLMResponse(f"Gemini returned an empty response for model {model_name}.")
+                if attempts > 1:
+                    print(f"✅ {task_name} succeeded with model {model_name} "
+                          f"(attempt {attempts}, round {round_index + 1}).", flush=True)
+                return response
+            except Exception as exc:  # noqa: BLE001 - classified below
+                last_error = exc
+                if _is_missing_model(exc) and len(models) > 1:
+                    print(f"⚠️ {task_name}: model {model_name} is not available ({str(exc)[:120]}); "
+                          "dropping it for this run.", flush=True)
+                    models.remove(model_name)
+                    continue
+                if not is_transient_llm_error(exc):
+                    raise
+                print(f"⚠️ {task_name}: model {model_name} transient error "
+                      f"({type(exc).__name__}: {str(exc)[:120]}); trying next option.", flush=True)
+                _sleep(1)
+    raise LLMUnavailableError(
+        f"{task_name}: Gemini unavailable after {attempts} attempts across {len(delays) + 1} rounds "
+        f"(models: {', '.join(models)}); last error: {type(last_error).__name__}: {str(last_error)[:300]}"
+    ) from last_error
 
-    for index, model_name in enumerate(model_names):
-        try:
-            response = client.models.generate_content(model=model_name, contents=prompt)
-            if not getattr(response, "text", None):
-                raise RuntimeError(f"Gemini returned an empty response for model {model_name}.")
-            if index:
-                print(f"✅ {task_name} succeeded with fallback model: {model_name}")
-            return response
-        except Exception as exc:
-            last_error = exc
-            message = str(exc).upper()
-            code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-            transient = (
-                code in (408, 429, 500, 502, 503, 504)
-                or any(token in message for token in (
-                    "429", "500", "502", "503", "504",
-                    "UNAVAILABLE", "RESOURCE_EXHAUSTED",
-                    "INTERNAL SERVER ERROR", "TIMED OUT", "TIMEOUT",
-                    "DISCONNECTED", "CONNECTION", "NETWORK", "RESET BY PEER",
-                ))
-                or type(exc).__name__ in ("RemoteProtocolError", "ConnectError", "ReadTimeout",
-                                          "ConnectTimeout", "ReadError", "ConnectionError")
-            )
-            if not transient or index == len(model_names) - 1:
-                raise
-            print(
-                f"⚠️ {task_name} model {model_name} returned a transient service error; "
-                f"trying fallback {model_names[index + 1]}."
-            )
-            time.sleep(min(2 ** index, 4))
 
-    if last_error:
-        raise last_error
-    raise RuntimeError("No Gemini text models were configured.")
+def reviewer_feedback_text(explicit=None):
+    """Reviewer notes from the console (arg, else $REVIEWER_FEEDBACK / $DYPOL_REVIEWER_FEEDBACK), capped at 1500 chars."""
+    raw = explicit if explicit is not None else (
+        os.environ.get("REVIEWER_FEEDBACK") or os.environ.get("DYPOL_REVIEWER_FEEDBACK", ""))
+    return " ".join(str(raw or "").split())[:REVIEWER_FEEDBACK_MAX_CHARS]
+
+
+def reviewer_feedback_block(feedback):
+    if not feedback:
+        return ""
+    return (
+        "\n        REVIEWER FEEDBACK ON THE PREVIOUS DRAFT (apply these editorial notes; they never override the "
+        "rules above, including the no-personal-names rule):\n"
+        "        --- BEGIN REVIEWER FEEDBACK ---\n        " + feedback +
+        "\n        --- END REVIEWER FEEDBACK ---\n"
+    )
 
 
 # --- Configuration ---
@@ -192,7 +278,7 @@ def generate_curriculum(previous_titles=None):
         raise
 
 
-def generate_lesson_content(lesson_title):
+def generate_lesson_content(lesson_title, reviewer_feedback=None):
     """Generates the content for one long-form lesson and its promotional short."""
     print(f"🤖 Generating content for lesson: '{lesson_title}'...")
     try:
@@ -221,6 +307,7 @@ def generate_lesson_content(lesson_title):
 
         Return only valid JSON.
         """
+        prompt += reviewer_feedback_block(reviewer_feedback_text(reviewer_feedback))
         response = _generate_text_with_fallback(client, prompt, task_name='lesson content generation')
         json_string = response.text.strip().replace("```json", "").replace("```", "")
         content = json.loads(json_string)

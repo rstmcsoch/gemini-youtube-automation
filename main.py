@@ -56,7 +56,7 @@ def generate_lesson_assets(lesson):
     part_safe = re.sub(r'[^\w]', '_', str(lesson['part'])).strip('_')
     unique_id = f"{datetime.datetime.now().strftime('%Y%m%d')}_{chapter_safe}_{part_safe}"
 
-    lesson_content = generate_lesson_content(lesson['title'])
+    lesson_content = generate_lesson_content(lesson['title'])  # reads $REVIEWER_FEEDBACK
     from src import storyboard as sb
     from src.production import produce_long, produce_short, fit_short_audio
     from src.visuals import gather_visuals
@@ -268,9 +268,11 @@ def main():
     except (CandidateNotFound, PolicyViolation) as exc:
         print(f"Phase refused safely: {exc}")
         sys.exit(2)
-    except Exception:
+    except Exception as exc:
         print("Pipeline failed.")
         traceback.print_exc()
+        from src.failure import report_failure
+        report_failure(exc, OUTPUT_DIR)
         sys.exit(1)
 
     try:

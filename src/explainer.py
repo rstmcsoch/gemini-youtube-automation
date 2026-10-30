@@ -391,23 +391,49 @@ def shot_windows(timeline):
     return [(max(0.0, s["start"] - half), min(total, s["end"] + half)) for s in timeline["shots"]]
 
 
-def render(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps=FPS, crf=21, progress=None):
-    """Compose frames and encode once. `shot_assets[i]` is the asset dict for timeline shot i."""
+def render_workers():
+    """Parallel render chunks: $DYPOL_RENDER_WORKERS, else cores - 1 (max 4); 1 = serial."""
+    import os
+    try:
+        value = int(os.environ.get("DYPOL_RENDER_WORKERS", "") or 0)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        value = min(4, max(1, (os.cpu_count() or 1) - 1))
+    return max(1, value)
+
+
+def _encoder_cmd(size, fps, crf, out_path, audio_path=None, total=None, threads=None):
     w, h = size
-    total = timeline["total"]
-    frames = int(math.ceil(total * fps))
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+           "-s", f"{w}x{h}", "-r", str(fps), "-i", "-"]
+    if audio_path is not None:
+        cmd += ["-i", str(audio_path), "-map", "0:v", "-map", "1:a"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p"]
+    if threads:
+        cmd += ["-threads", str(threads)]
+    if audio_path is not None:
+        cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-t", f"{total:.3f}"]
+    else:
+        # Chunk files are MPEG-TS: they concatenate cleanly with stream copy.
+        cmd += ["-an", "-f", "mpegts"]
+    return cmd + [str(out_path)]
+
+
+def _compose_range(timeline, shot_assets, size, overlay_fn, fps, start, stop, write, progress=None, label=""):
+    """Compose frames [start, stop) and hand each RGB frame's bytes to `write`.
+
+    Every frame is a pure function of its time t (stills are Ken Burns over t, clips
+    are read sequentially from their window start), so any frame range can be
+    rendered independently and the result is identical to a single pass.
+    """
     half = sb.XFADE / 2
     shots = timeline["shots"]
+    total = timeline["total"]
     windows = shot_windows(timeline)
     sources = {}
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-           "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", "-i", str(audio_path),
-           "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
-           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
-           "-t", f"{total:.3f}", str(out_path)]
-    enc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     try:
-        for f in range(frames):
+        for f in range(start, stop):
             t = f / fps
             active = [i for i, (a, b) in enumerate(windows) if a <= t < b] or [len(shots) - 1]
             layers = []
@@ -422,20 +448,117 @@ def render(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps=FP
                 alpha = _ease((t - (boundary - half)) / sb.XFADE)
                 frame = Image.blend(layers[0], layers[1], alpha)
             frame = overlay_fn(frame, t)
-            enc.stdin.write(frame.convert("RGB").tobytes())
+            write(frame.convert("RGB").tobytes())
             for i in list(sources):
                 if windows[i][1] <= t:
                     sources.pop(i).close()
-            if progress and f % (fps * 30) == 0:
-                progress(f"rendered {t:.0f}s / {total:.0f}s")
+            if progress and (f - start) % (fps * 30) == 0:
+                progress(f"{label}rendered {t:.0f}s / {total:.0f}s")
     finally:
         for src in sources.values():
             src.close()
+
+
+def _render_serial(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress):
+    total = timeline["total"]
+    frames = int(math.ceil(total * fps))
+    enc = subprocess.Popen(_encoder_cmd(size, fps, crf, out_path, audio_path, total), stdin=subprocess.PIPE)
+    try:
+        _compose_range(timeline, shot_assets, size, overlay_fn, fps, 0, frames, enc.stdin.write, progress)
+    finally:
         enc.stdin.close()
         code = enc.wait()
     if code != 0:
         raise RuntimeError(f"ffmpeg encode failed with exit code {code}")
     return Path(out_path)
+
+
+_PARALLEL_JOB = {}
+
+
+def _render_chunk(index):
+    """Child process: render one frame range to a video-only H.264 file (fork start method)."""
+    job = _PARALLEL_JOB
+    start, stop = job["bounds"][index]
+    out = job["chunk_paths"][index]
+    enc = subprocess.Popen(_encoder_cmd(job["size"], job["fps"], job["crf"], out, threads=job["threads"]),
+                           stdin=subprocess.PIPE)
+    try:
+        _compose_range(job["timeline"], job["shot_assets"], job["size"], job["overlay_fn"], job["fps"],
+                       start, stop, enc.stdin.write, job["progress"],
+                       label=f"chunk {index + 1}/{len(job['bounds'])}: ")
+    finally:
+        enc.stdin.close()
+        code = enc.wait()
+    if code != 0:
+        raise RuntimeError(f"ffmpeg chunk encode failed with exit code {code}")
+    return str(out)
+
+
+def chunk_bounds(frames, workers):
+    """Split [0, frames) into `workers` contiguous, near-equal ranges."""
+    step = frames / workers
+    edges = [int(round(k * step)) for k in range(workers)] + [frames]
+    return [(edges[k], edges[k + 1]) for k in range(workers) if edges[k + 1] > edges[k]]
+
+
+def _render_parallel(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress, workers):
+    import multiprocessing as mp
+    import os
+    import shutil
+    import tempfile
+    total = timeline["total"]
+    frames = int(math.ceil(total * fps))
+    bounds = chunk_bounds(frames, workers)
+    tmp = Path(tempfile.mkdtemp(prefix="render_chunks_", dir=str(Path(out_path).parent)))
+    try:
+        chunk_paths = [tmp / f"chunk_{k:02d}.ts" for k in range(len(bounds))]
+        _PARALLEL_JOB.clear()
+        _PARALLEL_JOB.update(timeline=timeline, shot_assets=shot_assets, size=size, overlay_fn=overlay_fn,
+                             fps=fps, crf=crf, bounds=bounds, chunk_paths=chunk_paths, progress=progress,
+                             threads=max(2, (os.cpu_count() or 2) // len(bounds)))
+        ctx = mp.get_context("fork")
+        with ctx.Pool(processes=len(bounds)) as pool:
+            pool.map(_render_chunk, range(len(bounds)))
+        listing = tmp / "chunks.txt"
+        listing.write_text("".join(f"file '{p.name}'\n" for p in chunk_paths), encoding="utf-8")
+        # Chunks share identical encode settings, so a stream-copy concat is lossless;
+        # only the audio is encoded here (same AAC settings as the serial path).
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+               "-i", str(listing), "-i", str(audio_path), "-map", "0:v", "-map", "1:a", "-c:v", "copy",
+               "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-t", f"{total:.3f}", str(out_path)]
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg concat failed with exit code {result.returncode}")
+    finally:
+        _PARALLEL_JOB.clear()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return Path(out_path)
+
+
+def render(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps=FPS, crf=21, progress=None,
+           workers=None):
+    """Compose frames and encode. `shot_assets[i]` is the asset dict for timeline shot i.
+
+    With more than one worker the timeline is split into contiguous frame ranges
+    rendered by separate processes (Python frame composition is the bottleneck),
+    then stream-copy concatenated; same resolution, fps, CRF and preset as the
+    single-pass path. Any parallel failure falls back to the single pass.
+    """
+    frames = int(math.ceil(timeline["total"] * fps))
+    workers = render_workers() if workers is None else max(1, int(workers))
+    workers = min(workers, max(1, frames // (fps * 4)))  # chunks of at least ~4 s
+    if workers > 1:
+        try:
+            if progress:
+                progress(f"parallel render: {workers} chunks")
+            return _render_parallel(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf,
+                                    progress, workers)
+        except Exception as exc:  # noqa: BLE001 - never lose a render to the speed path
+            if progress:
+                progress(f"parallel render failed ({exc}); falling back to single pass")
+            Path(out_path).unlink(missing_ok=True)
+    return _render_serial(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress)
 
 
 def long_overlay(timeline, slides, bullet_times, size):
