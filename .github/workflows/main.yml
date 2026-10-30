@@ -166,6 +166,10 @@ jobs:
           scopes = creds.get("scopes") or []
           if "https://www.googleapis.com/auth/youtube.upload" not in scopes:
               raise SystemExit("OAuth credential JSON does not include the youtube.upload scope.")
+          if "https://www.googleapis.com/auth/youtube.force-ssl" not in scopes:
+              # Not fatal: the uploader asks for force-ssl on refresh and falls back to
+              # upload-only (captions skipped) if the refresh token does not hold it.
+              print("::warning::credentials JSON scopes list lacks youtube.force-ssl; caption upload may be skipped.")
           print("YouTube OAuth JSON validated. Secret values were not printed.")
           PY
         shell: bash
@@ -243,6 +247,43 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+      # Fast console preview: a small 480p H.264 copy (+faststart, so the browser can start
+      # playing before the whole file arrives). Stored uncompressed in its own artifact so
+      # the console can stream the zip entry directly. Never fails the draft.
+      - name: 🎬 Build small preview copies for the console
+        id: preview
+        if: ${{ success() && inputs.phase != 'publish' }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mkdir -p preview
+          make_preview() {
+            # $1 source, $2 dest, $3 scale filter, $4 max video bitrate
+            ffmpeg -nostdin -y -hide_banner -loglevel error -i "$1" \
+              -vf "$3,fps=30" -c:v libx264 -preset veryfast -profile:v main -pix_fmt yuv420p \
+              -crf 30 -maxrate "$4" -bufsize "$4" -g 60 \
+              -c:a aac -b:a 64k -ac 2 -ar 44100 -movflags +faststart "$2" \
+              && echo "preview $(basename "$2"): $(du -h "$2" | cut -f1)" \
+              || { echo "::warning::preview encode failed for $1"; rm -f "$2"; }
+          }
+          LONG=$(ls output/long_video_*.mp4 2>/dev/null | head -n 1 || true)
+          SHORT=$(ls output/short_video_*.mp4 2>/dev/null | head -n 1 || true)
+          [ -n "$LONG" ] && make_preview "$LONG" preview/preview_long.mp4 "scale=-2:480" 450k
+          [ -n "$SHORT" ] && make_preview "$SHORT" preview/preview_short.mp4 "scale=-2:720" 700k
+          ls -la preview || true
+
+      - name: 📤 Upload console preview artifact
+        if: ${{ success() && inputs.phase != 'publish' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-${{ inputs.job_id || github.run_id }}
+          path: preview/
+          # Already-compressed mp4: store as-is (zip "stored") so the console can stream it.
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: warn
+
       - name: 🗂️ Upload verified DYPOL run result backup
         if: always()
         uses: actions/upload-artifact@v4
@@ -253,21 +294,21 @@ jobs:
           if-no-files-found: ignore
 
       - name: 🔎 Upload Audio Artifact for Debugging
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: audio-debug-files
           path: output/*.wav
-          retention-days: 3
+          retention-days: 1
           if-no-files-found: ignore
 
       - name: 🎥 Upload Final Video for Debugging
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: final-videos
           path: output/*.mp4
-          retention-days: 3
+          retention-days: 1
           if-no-files-found: ignore
 
       - name: 🎞️ Generate demo GIF from latest video
