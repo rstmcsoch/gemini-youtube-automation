@@ -53,6 +53,8 @@ def trip_breaker(name, reason=""):
     _BREAKERS[name] = {"reason": str(reason)[:200], "at": _now()}
     print(f"⚠️ {name} quota/limit hit ({str(reason)[:160]}); skipping {name} for the rest of this run "
           "and continuing with other sources.", flush=True)
+    # Machine-readable line shared with Engine B; the console quota panel parses it.
+    print(f"DYPOL_PROVIDER_LIMIT provider={name} action=skip_for_rest_of_run", flush=True)
     return True
 
 

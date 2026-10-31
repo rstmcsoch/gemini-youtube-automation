@@ -314,7 +314,7 @@ jobs:
       - name: 🎞️ Generate demo GIF from latest video
         if: steps.production-run.outcome == 'success'
         run: |
-          VIDEO=$(ls output/long_video_*.mp4 2>/dev/null | head -n 1)
+          VIDEO=$(ls output/long_video_*.mp4 2>/dev/null | head -n 1 || true)
           if [ -n "$VIDEO" ]; then
             echo "✅ Found video: $VIDEO — converting to GIF..."
             ffmpeg -y -ss 0 -t 12 -i "$VIDEO" \
