@@ -208,6 +208,13 @@ jobs:
           path: output
 
 
+      - name: 🎵 Cache background music (Open Lo-Fi CC0 tracks)
+        if: ${{ inputs.phase != 'publish' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/dypol-music
+          key: dypol-music-open-lofi-v1.0.0
+
       - name: 🚀 Run DYPOL phase-aware production pipeline
         id: production-run
         env:
@@ -222,6 +229,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           # NVIDIA hosted FLUX.1-schnell: used only after Cloudflare FLUX hits its daily limit.
           DYPOL_NVIDIA_FLUX_ENABLED: ${{ vars.DYPOL_NVIDIA_FLUX_ENABLED || '1' }}
+          # Quiet Open Lo-Fi (CC0) music under narration; set repo variable to 0 to turn off.
+          DYPOL_MUSIC_ENABLED: ${{ vars.DYPOL_MUSIC_ENABLED || '1' }}
+          DYPOL_MUSIC_GAIN_DB: ${{ vars.DYPOL_MUSIC_GAIN_DB || '-26' }}
           GEMINI_TEXT_MODEL: ${{ vars.GEMINI_TEXT_MODEL || 'gemini-3.8-flash' }}
           GEMINI_FALLBACK_MODELS: ${{ vars.GEMINI_FALLBACK_MODELS || 'gemini-3.6-flash,gemini-3.5-flash-lite' }}
           DYPOL_PHASE: ${{ inputs.phase || 'draft' }}

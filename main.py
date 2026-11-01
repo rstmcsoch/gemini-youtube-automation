@@ -214,6 +214,9 @@ def generate_lesson_assets(lesson):
                 "tags": "AI,Shorts,TechTip",
             },
         ],
+        # Background music bed (Open Lo-Fi CC0) per video; {"provider": "none"} = rendered without music.
+        "music": {"long": long_result.get("music") or {"provider": "none"},
+                  "short": short_result.get("music") or {"provider": "none"}},
     }
     # Record the YouTube AI disclosure the publish step will send, so the draft shows it.
     from dypol_control import asset_visual_manifest, resolve_contains_synthetic_media

@@ -147,8 +147,10 @@ def build_narration(segment_paths, pads, out_wav, min_total=None):
     return durations
 
 
-def mix_music_and_normalize(narration_wav, out_wav, music_path=MUSIC, music_db=-23, target_lufs=-14.0):
-    """Mix quiet music under narration and loudnorm to -14 LUFS (two-pass, true peak -1.5 dBTP)."""
+def mix_music_and_normalize(narration_wav, out_wav, music_path=None, music_db=-26, target_lufs=-14.0):
+    """Mix quiet music (music_db, default -26 dB, 1.5 s fade in / 2 s fade out) under
+    narration and loudnorm to -14 LUFS (two-pass, true peak -1.5 dBTP). music_path=None
+    renders narration only."""
     total = audio_duration(narration_wav)
     mixed = Path(str(out_wav) + ".mix.wav")
     if music_path and Path(music_path).exists():

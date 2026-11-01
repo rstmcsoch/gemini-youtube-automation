@@ -123,6 +123,35 @@ def _judge_finish(label, shot_assets, narration_for_shot, manifest, video_title,
     return summary
 
 
+_MUSIC = {}
+
+
+def background_music():
+    """This job's Open Lo-Fi (CC0) music bed, fetched once per run; None = render without music."""
+    if "record" not in _MUSIC:
+        import os
+        from src import open_lofi
+        _MUSIC["record"] = open_lofi.fetch_track(os.environ.get("DYPOL_JOB_ID", "") or "dypol", log=_log)
+    return _MUSIC["record"]
+
+
+def _mix_audio(narration, out_wav):
+    music = background_music()
+    if music:
+        music = dict(music)
+        try:
+            from src import open_lofi
+            music["applied_volume_db"] = open_lofi.relative_gain_db(
+                ex.measure_lufs(narration), ex.measure_lufs(music["path"]), music["gain_db"])
+        except Exception:  # noqa: BLE001 - measuring is best effort
+            music["applied_volume_db"] = music["gain_db"]
+        audio = ex.mix_music_and_normalize(narration, out_wav, music_path=music["path"],
+                                           music_db=music["applied_volume_db"])
+    else:
+        audio = ex.mix_music_and_normalize(narration, out_wav, music_path=None)
+    return audio, ({k: v for k, v in music.items() if k != "path"} if music else {"provider": "none"})
+
+
 def _is_real(asset):
     return bool(asset) and asset.get("provider") != sb.GRAPHIC_PROVIDER
 
@@ -214,7 +243,7 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
         caption_segments.append((sl["start"], words))
     shot_assets, manifest = _assign(timeline, per_slide_assets, LONG_SIZE, out_dir, "long")
 
-    audio = ex.mix_music_and_normalize(narration, out_dir / "audio_long_final.wav")
+    audio, music = _mix_audio(narration, out_dir / "audio_long_final.wav")
     overlay = ex.long_overlay(timeline, slides, bullet_times, LONG_SIZE)
     _log(f"rendering long video: {timeline['total']:.1f}s, {len(timeline['shots'])} shots")
     ex.render(timeline, shot_assets, audio, out_path, LONG_SIZE, overlay, progress=_log)
@@ -229,6 +258,7 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
     captions_path = _write_captions(caps.segments_to_words(caption_segments), out_dir / "captions_long.srt")
     _cleanup(narration, audio, shot_assets)
     return {"manifest": manifest, "timeline": timeline, "judge": judge_summary, "captions_path": captions_path,
+            "music": music,
             "own_assets": [a for assets in per_slide_assets for a in assets
                            if a.get("reusable") and _is_real(a)],
             # Stock stills survive cleanup; the Short may reuse them before any gradient.
@@ -311,7 +341,7 @@ def produce_short(script, voice_path, out_dir, out_path, gather, used, spec, own
     apply_graphic_cap(shot_assets, manifest, "short")
 
     words = sb.estimate_word_timings(script, speech, ex.detect_speech_regions(voice_path, speech))
-    audio = ex.mix_music_and_normalize(narration, out_dir / "audio_short_final.wav")
+    audio, music = _mix_audio(narration, out_dir / "audio_short_final.wav")
     overlay = ex.short_overlay(words, SHORT_SIZE)
     _log(f"rendering Short: {total:.1f}s, {n_shots} shots")
     ex.render(timeline, shot_assets, audio, out_path, SHORT_SIZE, overlay)
@@ -328,4 +358,4 @@ def produce_short(script, voice_path, out_dir, out_path, gather, used, spec, own
     for leftover in out_dir.glob("short_voice*"):
         leftover.unlink(missing_ok=True)
     return {"manifest": manifest, "timeline": timeline, "words": words, "judge": judge_summary,
-            "captions_path": captions_path}
+            "captions_path": captions_path, "music": music}
