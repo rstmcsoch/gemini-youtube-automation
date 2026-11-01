@@ -278,6 +278,16 @@
       "youtube_id": null,
       "origin": "dypol-topic-override",
       "uploads": []
+    },
+    {
+      "chapter": "Ad-hoc",
+      "part": "How AI spots phishing emails",
+      "title": "How AI spots phishing emails",
+      "topic": "How AI spots phishing emails",
+      "status": "draft_ready",
+      "youtube_id": null,
+      "origin": "dypol-topic-override",
+      "uploads": []
     }
   ]
 }
