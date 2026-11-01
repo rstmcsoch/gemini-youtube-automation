@@ -165,3 +165,21 @@ def test_uploader_insert_body(monkeypatch, tmp_path, manifest, env_value, expect
     assert "status" in captured["part"]
     assert record["contains_synthetic_media"] is expected
     assert record["visibility"] == "unlisted"
+
+
+@pytest.mark.parametrize("entry, expected", [
+    ({"provider": "nvidia_flux", "asset_id": "flux.1-schnell"}, True),
+    ({"provider": "cloudflare_workers_ai_flux"}, True),
+    ({"provider": "gemini_image"}, True),
+    ({"provider": "pixabay", "license": "Pixabay Content License"}, False),
+    ({"provider": "pixabay_video"}, False),
+    ({"provider": "gradient", "license": "Original generated gradient"}, False),
+    ({"provider": "dypol_generated_graphic", "license": "Original generated graphic (no third-party content)"}, False),
+])
+def test_disclosure_per_provider_and_privacy_kept(entry, expected):
+    flag = resolve_contains_synthetic_media([STOCK_ENTRY, entry], env={})
+    assert flag is expected
+    body = build_insert_body("T", "D", "a", "private", contains_synthetic_media=flag)
+    assert body["status"]["containsSyntheticMedia"] is expected
+    assert body["status"]["privacyStatus"] == "private"
+    assert body["status"]["selfDeclaredMadeForKids"] is False

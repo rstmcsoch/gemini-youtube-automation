@@ -144,9 +144,11 @@ SYNTHETIC_MEDIA_MODES = ("auto", "true", "false")
 # Lower-cased substrings that mark a manifest asset as AI-generated. Matched
 # against provider / asset_id / license, so FLUX on Cloudflare Workers AI
 # ("cloudflare_workers_ai", "cloudflare_workers_ai_flux", "flux-1-schnell"),
+# NVIDIA hosted FLUX ("nvidia_flux", "flux.1-schnell"),
 # Gemini images (license "AI-generated; ...") and any provider explicitly
 # tagged "ai-generated" are all detected.
-AI_ASSET_MARKERS = ("flux", "cloudflare", "ai-generated", "ai_generated", "ai generated", "gemini_image")
+AI_ASSET_MARKERS = ("flux", "cloudflare", "nvidia", "ai-generated", "ai_generated", "ai generated",
+                    "gemini_image")
 
 
 def _is_ai_asset(entry: dict) -> bool:

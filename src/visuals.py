@@ -60,6 +60,7 @@ def trip_breaker(name, reason=""):
 
 def reset_breakers():
     _BREAKERS.clear()
+    _NVIDIA_STATE.update({"last": 0.0, "square_only": False, "disabled": ""})
 
 
 def breaker_status():
@@ -70,6 +71,108 @@ def flux_available():
     """FLUX can be called: credentials present and its breaker is closed."""
     return (not breaker_open("flux") and bool(os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip())
             and bool(os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()))
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA hosted FLUX.1-schnell: fallback image source used ONLY after Cloudflare
+# Workers AI FLUX hit its daily limit (breaker "flux" open). Same no-text /
+# no-logo prompts; images go through the same contact-sheet visual judge.
+# Docs: https://docs.api.nvidia.com/nim/reference/black-forest-labs-flux_1-schnell-infer
+# Request {prompt, width, height, seed, steps<=4}; response {"artifacts": [{"base64",
+# "finishReason", "seed"}]} (JPEG). Free tier ~40 requests/min -> throttled.
+# ---------------------------------------------------------------------------
+NVIDIA_FLUX_URL = "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-schnell"
+NVIDIA_FLUX_PROVIDER = "nvidia_flux"
+NVIDIA_FLUX_SOURCE_URL = "https://build.nvidia.com/black-forest-labs/flux_1-schnell"
+NVIDIA_FLUX_LICENSE = "AI-generated with FLUX.1 [schnell] (Apache-2.0 model) on NVIDIA hosted NIM API"
+NVIDIA_FLUX_SIZES = {"landscape": (1344, 768), "portrait": (768, 1344)}
+_NVIDIA_STATE = {"last": 0.0, "square_only": False, "disabled": ""}
+
+
+def _env_on(name, default="1"):
+    return str(os.environ.get(name, default) or default).strip().casefold() not in {"0", "false", "no", "off"}
+
+
+def nvidia_flux_available():
+    """NVIDIA FLUX may be called: Cloudflare FLUX hit its limit this run, a key is set,
+    the fallback is enabled (DYPOL_NVIDIA_FLUX_ENABLED, default on) and NVIDIA's own
+    breaker is closed."""
+    return (breaker_open("flux") and not breaker_open(NVIDIA_FLUX_PROVIDER)
+            and not _NVIDIA_STATE["disabled"] and _env_on("DYPOL_NVIDIA_FLUX_ENABLED")
+            and bool(os.environ.get("NVIDIA_API_KEY", "").strip()))
+
+
+def ai_image_available():
+    """Some AI still source can be called right now (Cloudflare FLUX, else NVIDIA FLUX)."""
+    return flux_available() or nvidia_flux_available()
+
+
+def _nvidia_throttle():
+    try:
+        interval = float(os.environ.get("DYPOL_NVIDIA_FLUX_MIN_INTERVAL", "1.6"))
+    except ValueError:
+        interval = 1.6
+    wait = _NVIDIA_STATE["last"] + max(0.0, interval) - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _NVIDIA_STATE["last"] = time.monotonic()
+
+
+def _nvidia_image_b64(data):
+    if not isinstance(data, dict):
+        return None
+    for art in data.get("artifacts") or []:
+        if isinstance(art, dict) and art.get("base64"):
+            if str(art.get("finishReason") or "SUCCESS").upper() not in ("SUCCESS", "STOP", ""):
+                return None  # e.g. CONTENT_FILTERED
+            return art["base64"]
+    if data.get("image"):
+        return data["image"]
+    for item in data.get("data") or []:
+        if isinstance(item, dict) and (item.get("b64_json") or item.get("image")):
+            return item.get("b64_json") or item.get("image")
+    return None
+
+
+def nvidia_flux_request(prompt, orientation="landscape", seed=0):
+    """One NVIDIA FLUX.1-schnell call -> image bytes, or None. Never raises.
+    429 / quota opens the nvidia_flux breaker (one DYPOL_PROVIDER_LIMIT line)."""
+    key = os.environ.get("NVIDIA_API_KEY", "").strip()
+    if not key or not nvidia_flux_available():
+        return None
+    import base64
+    size = (1024, 1024) if _NVIDIA_STATE["square_only"] else NVIDIA_FLUX_SIZES.get(orientation, (1024, 1024))
+    for attempt in range(2):
+        body = {"prompt": prompt, "width": size[0], "height": size[1],
+                "seed": int(seed or 0) % 2147483647, "steps": 4}
+        _nvidia_throttle()
+        try:
+            response = requests.post(NVIDIA_FLUX_URL, json=body, timeout=(8, 90), headers={
+                "Authorization": f"Bearer {key}", "Accept": "application/json"})
+        except requests.RequestException as exc:
+            print(f"NVIDIA FLUX request failed: {exc}")
+            return None
+        if response.status_code == 200:
+            try:
+                b64 = _nvidia_image_b64(response.json())
+                return base64.b64decode(b64) if b64 else None
+            except (ValueError, TypeError):
+                return None
+        text = _response_text(response)
+        if is_quota_error(response.status_code, text):
+            trip_breaker(NVIDIA_FLUX_PROVIDER, f"HTTP {response.status_code} {text[:120]}")
+            return None
+        if response.status_code in (400, 422) and size != (1024, 1024) and attempt == 0:
+            _NVIDIA_STATE["square_only"] = True  # hosted endpoint only accepts 1024x1024
+            size = (1024, 1024)
+            continue
+        if response.status_code in (401, 403, 404):
+            _NVIDIA_STATE["disabled"] = f"HTTP {response.status_code}"
+            print(f"NVIDIA FLUX unavailable (HTTP {response.status_code}); not trying it again this run")
+            return None
+        print(f"NVIDIA FLUX request failed: HTTP {response.status_code} {text[:200]}")
+        return None
+    return None
 
 
 def _response_text(response):
@@ -246,6 +349,30 @@ def _cloudflare_generate(prompt, output_path):
         return None
 
 
+def _nvidia_generate_legacy(prompt, output_path):
+    """Legacy select_visual fallback: NVIDIA FLUX only after Cloudflare FLUX hit its limit."""
+    if not nvidia_flux_available():
+        return None
+    data = nvidia_flux_request(f"Vertical 9:16 editorial illustration, no text, no watermark: {prompt}", "portrait")
+    if not data:
+        return None
+    try:
+        output_path.write_bytes(data)
+        with Image.open(output_path) as im:
+            im.verify()
+        with Image.open(output_path) as im:
+            im.convert("RGB").save(output_path, format="PNG")
+    except (OSError, ValueError):
+        output_path.unlink(missing_ok=True)
+        return None
+    return {
+        "provider": NVIDIA_FLUX_PROVIDER, "source_url": NVIDIA_FLUX_SOURCE_URL, "asset_id": "flux.1-schnell",
+        "license": NVIDIA_FLUX_LICENSE, "license_url": "https://huggingface.co/black-forest-labs/FLUX.1-schnell",
+        "fallback_for": "cloudflare_workers_ai", "retrieved_at": _now(),
+        "sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+    }
+
+
 _GEMINI_IMAGE_DISABLED_FOR_QUOTA = False
 
 
@@ -347,7 +474,7 @@ def select_visual(intent, output_path, used_hashes=None):
             except (requests.RequestException, OSError, ValueError):
                 output_path.unlink(missing_ok=True)
                 continue
-    ai = _cloudflare_generate(query, output_path)
+    ai = _cloudflare_generate(query, output_path) or _nvidia_generate_legacy(query, output_path)
     if ai:
         digest = ai["sha256"]
         if digest not in used_hashes:
@@ -670,7 +797,44 @@ def _stock_video(query, terms, out_dir, used, label, min_seconds=5, ctx=None, ju
 
 
 def flux_generate(scene, output_path, orientation="landscape", seed=None):
-    """Generate one FLUX still; returns a flat manifest dict or None. Never raises."""
+    """One AI still: Cloudflare Workers AI FLUX first; only once its daily limit is hit
+    (breaker "flux" open) NVIDIA hosted FLUX.1-schnell with the same prompt. Returns a
+    flat manifest dict (``provider`` says which made it) or None. Never raises."""
+    asset = cloudflare_flux_generate(scene, output_path, orientation, seed) if flux_available() else None
+    if asset is None and nvidia_flux_available():
+        asset = nvidia_flux_generate(scene, output_path, orientation, seed)
+    return asset
+
+
+def nvidia_flux_generate(scene, output_path, orientation="landscape", seed=None):
+    """NVIDIA FLUX.1-schnell still with the same brand/text-free prompt as Cloudflare FLUX."""
+    prompt = sb.flux_prompt(scene, orientation)
+    data = nvidia_flux_request(prompt, orientation, seed=(seed or 0) + 1)
+    if not data:
+        return None
+    output_path = Path(output_path)
+    try:
+        output_path.write_bytes(data)
+        with Image.open(output_path) as im:
+            im.verify()
+        with Image.open(output_path) as im:
+            width, height = im.size
+            im.convert("RGB").save(output_path, format="PNG")
+    except (OSError, ValueError) as exc:
+        print(f"NVIDIA FLUX image unreadable: {exc}")
+        output_path.unlink(missing_ok=True)
+        return None
+    return {
+        "kind": "image", "provider": NVIDIA_FLUX_PROVIDER, "source_url": NVIDIA_FLUX_SOURCE_URL,
+        "asset_id": "flux.1-schnell", "license": NVIDIA_FLUX_LICENSE, "license_url": FLUX_LICENSE_URL,
+        "fallback_for": "cloudflare_workers_ai_flux",
+        "sha256": _sha256(output_path), "retrieved_at": _now(), "prompt": prompt,
+        "width": width, "height": height, "path": str(output_path), "reusable": True, "third_party": False,
+    }
+
+
+def cloudflare_flux_generate(scene, output_path, orientation="landscape", seed=None):
+    """Generate one Cloudflare Workers AI FLUX still; returns a flat manifest dict or None. Never raises."""
     account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
     token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
     if not account or not token or breaker_open("flux"):
@@ -807,7 +971,7 @@ def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s
                 if (provider == "video" and allow_video) or (provider == "still" and allow_still):
                     asset = _stock_attempt(provider, query, terms, out_dir, used, px_orientation, sub,
                                            ctx=ctx, jstate=jstate)
-            elif provider == "flux" and flux_available():
+            elif provider == "flux" and ai_image_available():
                 variant = _FLUX_VARIANTS[flux_n % len(_FLUX_VARIANTS)]
                 asset = flux_generate(f"{spec.get('image_prompt') or query}, {variant}",
                                       out_dir / f"{sub}_flux.png", orientation,

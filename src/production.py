@@ -51,7 +51,7 @@ def manifest_entry(asset, video, slide, shots, timeline):
         "review_required": False,
     }
     for optional in ("tags", "query", "matched_terms", "prompt", "duration", "width", "height",
-                     "fallback_query", "borrowed"):
+                     "fallback_query", "borrowed", "fallback_for"):
         if asset.get(optional) not in (None, "", []):
             entry[optional] = asset[optional]
     entry["judge_status"] = _judge_status()
@@ -142,8 +142,8 @@ def apply_graphic_cap(shot_assets, manifest, label):
 
 def _flux_available():
     try:
-        from src.visuals import flux_available
-        return flux_available()
+        from src.visuals import ai_image_available
+        return ai_image_available()
     except Exception:  # noqa: BLE001 - visuals deps missing in minimal test envs
         return False
 

@@ -184,7 +184,7 @@ def generate_lesson_assets(lesson):
                      for reason in (summary.get("needs_review_reasons") or [])]
     if judge_reasons:
         visual_review_required = True
-    return {
+    candidate = {
         "job_id": os.environ.get("DYPOL_JOB_ID", ""),
         "lesson_title": lesson["title"],
         "review_required": visual_review_required,
@@ -215,6 +215,18 @@ def generate_lesson_assets(lesson):
             },
         ],
     }
+    # Record the YouTube AI disclosure the publish step will send, so the draft shows it.
+    from dypol_control import asset_visual_manifest, resolve_contains_synthetic_media
+    for asset in candidate["assets"]:
+        asset["contains_synthetic_media"] = resolve_contains_synthetic_media(
+            asset_visual_manifest(candidate, asset))
+    candidate["contains_synthetic_media"] = any(a["contains_synthetic_media"] for a in candidate["assets"])
+    candidate["image_providers"] = sorted({str(e.get("provider")) for e in visual_manifests
+                                           if isinstance(e, dict) and e.get("provider")})
+    print("containsSyntheticMedia (draft): " + ", ".join(
+        f"{a['kind']}={a['contains_synthetic_media']}" for a in candidate["assets"])
+        + f"; image providers: {', '.join(candidate['image_providers']) or 'none'}", flush=True)
+    return candidate
 
 def upload_candidate_asset(asset, policy):
     """Upload one saved candidate asset and return its verified YouTube record."""
