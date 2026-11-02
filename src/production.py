@@ -352,7 +352,9 @@ def _spoken(timeline, words, g):
 _KEY_STOP = {"a", "an", "the", "of", "to", "in", "on", "by", "or", "and", "is", "are", "be", "it", "as", "at",
              "that", "this", "with", "for", "from", "into", "if", "so", "but", "then", "than", "when", "while",
              "your", "you", "we", "our", "their", "they", "its", "it's", "was", "were", "has", "have", "can",
-             "will", "just", "every", "each", "what", "which", "who", "how", "why", "where", "there"}
+             "will", "just", "every", "each", "what", "which", "who", "how", "why", "where", "there",
+             "should", "would", "could", "may", "might", "must", "do", "does", "did", "not", "no", "been",
+             "being", "about", "more", "also", "very", "these", "those", "some", "any", "us", "me", "my"}
 
 
 def key_phrase(words, max_words=4):
@@ -360,14 +362,23 @@ def key_phrase(words, max_words=4):
 
     Picks the window of <= max_words that starts and ends on a content word and holds the
     most content words (ties: the later window, nearer the point of the sentence)."""
-    toks = [str(w).strip(".,;:!?()\"'“”") for w in words]
-    toks = [t for t in toks if t]
+    toks, sentence, sid = [], [], 0
+    for w in words:
+        raw = str(w)
+        t = raw.strip(".,;:!?()\"'“”")
+        if t:
+            toks.append(t)
+            sentence.append(sid)
+        if raw.rstrip("\"'”)").endswith((".", "?", "!")):
+            sid += 1          # a callout never spans two sentences ("Next build Links")
     content = [t.casefold() not in _KEY_STOP and len(t) > 1 or t[:1].isdigit() for t in toks]
     best, best_score = [], (-1, -1, -1)
     for i in range(len(toks)):
         if not content[i]:
             continue
         for j in range(i, min(len(toks), i + max_words)):
+            if sentence[j] != sentence[i]:
+                break
             if not content[j]:
                 continue
             n_content = sum(content[i:j + 1])

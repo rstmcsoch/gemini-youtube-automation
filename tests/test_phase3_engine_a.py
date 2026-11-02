@@ -63,3 +63,8 @@ def test_hook_stills_are_converted(tmp_path):
     assert "stock_or_ai_still" not in hook[:4], hook           # the cold open is never stills
     assert kinds[0] == "count_up"
     assert any(fixed.get(g, {}).get("block") == "diagram" for g in tl["slides"][0]["shots"])  # roadmap
+
+
+def test_key_phrase_never_spans_sentences():
+    phrase = production.key_phrase("should we test in our next build? Links are in the description.".split())
+    assert "Links" not in phrase.split() or "build" not in phrase.split()

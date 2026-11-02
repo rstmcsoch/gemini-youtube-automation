@@ -209,7 +209,9 @@ def generate_lesson_assets(lesson):
         f"Part of the {__import__('os').environ.get('CHANNEL_BRAND', 'Signal by DYPOL')} series.\n\n"
         f"Today's Lesson: {lesson['title']}\n\n{hashtags}"
     )
-    long_tags = ", ".join(["AI", "Artificial Intelligence", "Developer", "Programming", "Tutorial"] + title_tags(lesson["title"]))
+    _base_tags = ["AI", "Artificial Intelligence", "Developer", "Programming", "Tutorial"]
+    long_tags = ", ".join(_base_tags + [t for t in title_tags(lesson["title"])
+                                        if t.casefold() not in {b.casefold() for b in _base_tags}])
     highlight = (lesson_content.get("short_form_highlight") or "").strip()
     if not highlight:
         highlight = f"AI Quick Tip: {lesson['title']}"
