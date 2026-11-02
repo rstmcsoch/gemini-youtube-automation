@@ -301,7 +301,7 @@ def plan_blocks(timeline, slides, out_dir=None, size=LONG_SIZE, label="long", wo
         _enforce_mix(timeline, slides, fixed, kinds, words, out_dir, size, label)
     except Exception as exc:  # noqa: BLE001 - the mix pass must never lose a render
         _log(f"{label}: shot-mix enforcement failed ({exc}); keeping the planned mix")
-    _govern_runs(timeline, slides, fixed, kinds, out_dir, size, label)
+    _govern_runs(timeline, slides, fixed, kinds, out_dir, size, label, words=words)
     return fixed, kinds
 
 
@@ -349,6 +349,39 @@ def _spoken(timeline, words, g):
     return [w for w, s, e in slide_words or [] if e > a + 0.05 and s < b - 0.05]
 
 
+_KEY_STOP = {"a", "an", "the", "of", "to", "in", "on", "by", "or", "and", "is", "are", "be", "it", "as", "at",
+             "that", "this", "with", "for", "from", "into", "if", "so", "but", "then", "than", "when", "while",
+             "your", "you", "we", "our", "their", "they", "its", "it's", "was", "were", "has", "have", "can",
+             "will", "just", "every", "each", "what", "which", "who", "how", "why", "where", "there"}
+
+
+def key_phrase(words, max_words=4):
+    """A 2-4 word callout from spoken words, never the clause verbatim (style rule 12).
+
+    Picks the window of <= max_words that starts and ends on a content word and holds the
+    most content words (ties: the later window, nearer the point of the sentence)."""
+    toks = [str(w).strip(".,;:!?()\"'“”") for w in words]
+    toks = [t for t in toks if t]
+    content = [t.casefold() not in _KEY_STOP and len(t) > 1 or t[:1].isdigit() for t in toks]
+    best, best_score = [], (-1, -1, -1)
+    for i in range(len(toks)):
+        if not content[i]:
+            continue
+        for j in range(i, min(len(toks), i + max_words)):
+            if not content[j]:
+                continue
+            n_content = sum(content[i:j + 1])
+            if n_content < 2 and j > i:
+                continue
+            score = (n_content, -(j - i + 1 - n_content), i)
+            if score > best_score:
+                best, best_score = toks[i:j + 1], score
+    if len(best) < 2:
+        return ""
+    phrase = " ".join(best)
+    return phrase[:1].upper() + phrase[1:]
+
+
 def _block_members(fixed, bid):
     return sorted(g for g, a in fixed.items() if a.get("block_id") == bid)
 
@@ -357,12 +390,19 @@ def _would_run(kinds, fixed, g, kind, bid):
     """True when setting shot g to (kind, bid) would create a run of 3 same-kind units."""
     from src import shotlist
     old_kind, old = kinds[g], fixed.get(g)
+    lo, hi = max(0, g - 8), min(len(kinds), g + 9)
+
+    def _runs_of(k):
+        units = [u for u, _ in _units(kinds[lo:hi], {i - lo: fixed[i] for i in range(lo, hi) if i in fixed})]
+        return [r for r in shotlist.runs_over(units, shotlist.max_run()) if r[1] == k]
+
+    # Only a run of the NEW kind counts: an existing run of stills around g must not block
+    # breaking it up (the first live draft kept a 7-still hook because of this).
+    before = len(_runs_of(kind)) if old_kind != kind else 0
     kinds[g] = kind
     fixed[g] = dict(old or {}, block_id=bid)
     try:
-        lo, hi = max(0, g - 8), min(len(kinds), g + 9)
-        units = [k for k, _ in _units(kinds[lo:hi], {i - lo: fixed[i] for i in range(lo, hi) if i in fixed})]
-        return bool(shotlist.runs_over(units, shotlist.max_run()))
+        return len(_runs_of(kind)) > before
     finally:
         kinds[g] = old_kind
         if old is None:
@@ -394,8 +434,12 @@ def _enforce_mix(timeline, slides, fixed, kinds, words, out_dir, size, label):
     def demo_share():
         return sum(k in demo_kinds for k in kinds) / n
 
+    total_s = sum(b - a for a, b in windows) or 1.0
+
     def still_share():
-        return kinds.count(shotlist.STILL) / n
+        # The cap holds by count AND by screen time (stills tend to sit on the longer shots).
+        by_time = sum(windows[g][1] - windows[g][0] for g in range(n) if kinds[g] == shotlist.STILL) / total_s
+        return max(kinds.count(shotlist.STILL) / n, by_time)
 
     def done():
         return demo_share() >= variety["min_demo_share"] and still_share() <= variety["max_still_share"]
@@ -450,18 +494,23 @@ def _enforce_mix(timeline, slides, fixed, kinds, words, out_dir, size, label):
             return True
         slide = slides[slide_i] if slide_i < len(slides) else {}
         bullets = [b for b in slide.get("bullets") or [] if b]
+        title = slide.get("title", "")
+        if slide_i == 0 and len(bullets) < 2 and len(slides) > 3:
+            # The cold open has no bullets: preview the chapters ahead as a roadmap diagram.
+            bullets = [s.get("title", "") for s in slides[1:-1] if s.get("title")][:4]
+            title = "What's ahead"
         if slide_i not in diagram_slides and len(bullets) >= 2:
             nodes = [sb.clamp_bullet(b, 3) for b in bullets[:4]]
             nodes = [x for x in nodes if x]
             if len(nodes) >= 2 and place(g, {"kind": "diagram", "nodes": nodes, "title": sb.clamp_bullet(
-                    slide.get("title", ""), 5), "keywords": [], "fallback": "kinetic_text"}, "dia"):
+                    title, 5), "keywords": [], "fallback": "kinetic_text"}, "dia"):
                 diagram_slides.add(slide_i)
                 return True
         return False
 
     def to_kinetic(g):
         said = _spoken(timeline, words, g)
-        text = sb.clamp_bullet(" ".join(said), 6) if len(said) >= 2 else ""
+        text = key_phrase(said) if len(said) >= 2 else ""
         if len(text.split()) < 2:
             slide = slides[shots[g]["slide"]] if shots[g]["slide"] < len(slides) else {}
             bullets = [b for b in slide.get("bullets") or [] if b]
@@ -469,6 +518,14 @@ def _enforce_mix(timeline, slides, fixed, kinds, words, out_dir, size, label):
         if not text:
             return False
         return place(g, {"kind": "kinetic_text", "text": text, "keywords": [], "fallback": shotlist.STILL}, "txt")
+
+    # Hook: stock/AI stills never carry the cold open (style rule 1/5). Keep at most one,
+    # converted regardless of the global shares, so the hook is never a still slideshow.
+    hook_cap = int(variety.get("max_hook_stills", 1))
+    hook = [g for g in range(n) if shots[g]["slide"] == 0 and kinds[g] == shotlist.STILL] if len(slides) > 1 else []
+    for g in hook[:-hook_cap] if hook_cap > 0 else hook:
+        if kinds[g] == shotlist.STILL and not to_demo(g):
+            to_kinetic(g)
 
     if done():
         return
@@ -515,7 +572,7 @@ def _units(kinds, fixed):
     return [(k, idx) for k, idx, _ in units]
 
 
-def _govern_runs(timeline, slides, fixed, kinds, out_dir, size, label):
+def _govern_runs(timeline, slides, fixed, kinds, out_dir, size, label, words=None):
     """Never 3 units of the same kind in a row: the 3rd still becomes a kinetic_text callout
     from the slide's bullets; a 3rd rendered block of the same kind falls back to a still."""
     from src import blocks, shotlist
@@ -534,6 +591,8 @@ def _govern_runs(timeline, slides, fixed, kinds, out_dir, size, label):
                     slide = slides[timeline["shots"][g]["slide"]]
                     bullets = [b for b in slide.get("bullets") or [] if b]
                     text = bullets[(g // 2) % len(bullets)] if bullets else ""
+                    if not text:
+                        text = key_phrase(_spoken(timeline, words, g))
                     if not text:
                         continue
                     spec = {"kind": "kinetic_text", "text": text, "keywords": [], "fallback": shotlist.STILL}

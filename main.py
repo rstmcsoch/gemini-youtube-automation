@@ -22,6 +22,33 @@ CONTENT_PLAN_FILE = Path("content_plan.json")
 OUTPUT_DIR = Path("output")
 LESSONS_PER_RUN = 1
 
+_TAG_STOP = {"a", "an", "the", "of", "to", "in", "on", "by", "or", "and", "is", "are", "how", "what", "why",
+             "when", "you", "your", "it", "its", "next", "do", "does", "for", "with", "from", "into"}
+
+
+def shorts_title(text, limit=100):
+    """'<text> #Shorts' within YouTube's 100-char limit, cut on a word boundary (never mid-word)."""
+    suffix = " #Shorts"
+    text = " ".join(str(text or "").split())
+    room = limit - len(suffix)
+    if len(text) > room:
+        cut = text[:room + 1].rsplit(" ", 1)[0] if " " in text[:room + 1] else text[:room]
+        text = cut.rstrip(" ,;:-")
+    return f"{text}{suffix}"
+
+
+def title_tags(title):
+    """Content words of the title as tags (no 'How', 'what', 'you'...), de-duplicated."""
+    seen, tags = set(), []
+    for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9+#.-]*", str(title or "")):
+        k = w.casefold()
+        if k in _TAG_STOP or k in seen or len(k) < 2:
+            continue
+        seen.add(k)
+        tags.append(w if w.isupper() else w.capitalize())
+    return tags
+
+
 def get_content_plan():
     if not CONTENT_PLAN_FILE.exists():
         print("📄 content_plan.json not found. Generating new plan...")
@@ -182,11 +209,11 @@ def generate_lesson_assets(lesson):
         f"Part of the {__import__('os').environ.get('CHANNEL_BRAND', 'Signal by DYPOL')} series.\n\n"
         f"Today's Lesson: {lesson['title']}\n\n{hashtags}"
     )
-    long_tags = "AI, Artificial Intelligence, Developer, Programming, Tutorial, " + lesson["title"].replace(" ", ", ")
+    long_tags = ", ".join(["AI", "Artificial Intelligence", "Developer", "Programming", "Tutorial"] + title_tags(lesson["title"]))
     highlight = (lesson_content.get("short_form_highlight") or "").strip()
     if not highlight:
         highlight = f"AI Quick Tip: {lesson['title']}"
-    short_title = f"{highlight[:90].rstrip()} #Shorts"
+    short_title = shorts_title(highlight if len(highlight) <= 70 else lesson["title"])
     short_desc = (
         f"{highlight}\n\nWatch the full lesson on our channel.\n\n{hashtags}"
     )
@@ -275,7 +302,7 @@ def upload_candidate_asset(asset, policy):
         title = title_override or title
         description = description_override or description
     elif title_override:
-        title = f"{title_override[:88].rstrip()} #Shorts"
+        title = shorts_title(title_override)
     return upload_to_youtube(
         asset["path"],
         title,
