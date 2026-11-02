@@ -163,16 +163,26 @@ def generate_lesson_assets(lesson):
     print("\n--- Producing Short Video ---")
     highlight_text = (lesson_content.get("short_form_highlight") or "").strip()
     hook = sb.clamp_bullet(lesson_content.get("short_hook") or "", 8)
+    short_plan = lesson_content.get("short") if isinstance(lesson_content.get("short"), dict) else {}
     short_script = " ".join(str(lesson_content.get("short_script") or "").split())
+    if short_plan:
+        # hook -> 2-3 how-it-works beats -> the catch -> takeaway (no CTA)
+        parts = [short_plan.get("hook")] + [b.get("text") for b in short_plan.get("beats") or [] if isinstance(b, dict)]
+        catch = short_plan.get("catch")
+        parts += [catch.get("text") if isinstance(catch, dict) else catch, short_plan.get("takeaway")]
+        planned = " ".join(" ".join(str(p).split()) for p in parts if p)
+        if len(planned.split()) >= max(60, len(short_script.split()) - 10):
+            short_script = planned
+        hook = hook or sb.clamp_bullet(short_plan.get("hook") or "", 8)
     if len(short_script.split()) < 25:
         short_script = f"{hook + '. ' if hook else ''}{highlight_text}".strip()
     if hook and not short_script.casefold().startswith(hook.casefold()[:12]):
         short_script = f"{hook.rstrip('.?!')}? {short_script}" if hook.endswith("?") else f"{hook.rstrip('.')}. {short_script}"
-    short_script = " ".join(short_script.replace("#", " ").split()[:110])
+    short_script = " ".join(short_script.replace("#", " ").split()[:170])
+    print(f"📝 Short script: {len(short_script.split())} words")
     short_slide_dir = OUTPUT_DIR / f"slides_short_{unique_id}"
     short_slide_dir.mkdir(parents=True, exist_ok=True)
-    short_script, short_voice = fit_short_audio(
-        text_to_speech, short_script, "The full lesson is on our channel.", short_slide_dir)
+    short_script, short_voice = fit_short_audio(text_to_speech, short_script, "", short_slide_dir)
     short_queries = sb.normalize_queries(lesson_content.get("short_visual_queries"),
                                          " ".join(q for s in body_slides for q in s["visual_queries"]))
     short_spec = {"visual_queries": short_queries, "image_prompt": intro_slide["image_prompt"],
@@ -182,7 +192,7 @@ def generate_lesson_assets(lesson):
     print(f"🎥 Creating short video at: {short_video_path}")
     short_result = produce_short(short_script, short_voice, short_slide_dir, short_video_path,
                                  gather_visuals, used_assets, short_spec, long_result["own_assets"],
-                                 fallback_assets=long_result.get("stock_assets", ()))
+                                 fallback_assets=long_result.get("stock_assets", ()), plan=short_plan)
     (short_slide_dir / "visual_manifest.json").write_text(json.dumps(short_result["manifest"], indent=2), encoding="utf-8")
     (short_slide_dir / "visual_judge.json").write_text(json.dumps(short_result.get("judge") or {}, indent=2), encoding="utf-8")
 

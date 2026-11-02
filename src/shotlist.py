@@ -231,7 +231,9 @@ PROMPT_RULES = """
           plus the fields its kind needs:
             kinetic_text: "text" (1-6 words, the key phrase, never the full narration sentence)
             count_up: "value" (the number, e.g. "94.5"), optional "prefix" ("$"), "suffix" ("%", "x", "ms"),
-                      "label" (2-5 words), optional "source" (e.g. "OpenAI blog, Oct 2026")
+                      "label" (2-5 plain words naming what the number counts, readable on its own,
+                      e.g. "dimensions per word", "of code suggestions kept"; never a sentence fragment
+                      or a unit code like "512D"), optional "source" (e.g. "OpenAI blog, Oct 2026")
             code_panel: "code" (2-8 short lines of real, runnable code or shell commands), "language"
                       ("python", "bash", "javascript", "json"...), optional "title" (file name), optional
                       "highlight_line" (1-based line to light up)
@@ -250,7 +252,8 @@ HOOK_RULES = """
         - "hook": the cold open, spoken first. No greeting, no channel name, no "welcome", no "today we will".
           The first sentence (at most 14 words) names the subject and what happened. By the third second say why it
           matters (the stakes). Within the first 20 words say one concrete number.
-        - "hook_number": that number as {{"value": "...", "prefix": "", "suffix": "", "label": "2-5 words"}}.
+        - "hook_number": that number as {{"value": "...", "prefix": "", "suffix": "", "label": "2-5 plain words naming
+          what it counts", "source": "publisher + year if it is a published figure"}}.
         - "takeaway": one sentence, the single thing to remember; "takeaway_short": the same in at most 6 words.
         - "ask": exactly one specific comment question for the viewer, at most 12 words (no "like and subscribe").
 """

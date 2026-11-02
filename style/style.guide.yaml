@@ -29,7 +29,8 @@ long:
     max_same_kind_run: 2           # never 3 blocks of the same kind in a row
     min_demo_share: 0.40           # share of shots that are demo-style blocks
     max_still_share: 0.15
-    demo_kinds: [code_panel, diagram, count_up]
+    demo_kinds: [code_panel, diagram, count_up, icon_flow]   # icon_flow: internal (not in the model's enum)
+    max_text_run: 2                # at most 2 text-dominant blocks (kinetic_text, chapter_card) in a row
   ending:
     takeaway: true
     asks: 1                        # exactly one ask: a specific comment question

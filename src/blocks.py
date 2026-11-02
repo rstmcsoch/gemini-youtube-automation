@@ -11,6 +11,8 @@ import re
 
 from PIL import Image, ImageDraw
 
+from src import backdrop as bd
+from src import icons
 from src import style
 
 PROVIDER = "dypol_block"
@@ -48,9 +50,22 @@ class _Base:
         self.size = tuple(size)
         self.span = max(0.5, float(span))
         self.w, self.h = self.size
-        self.s = self.h / 1080.0
-        self.margin = int(self.w * style.long_rules()["text"]["safe_margin"])
+        # Portrait (Shorts, 1080x1920): scale by width, keep content in the upper safe zone
+        # (clear of the captions at ~63 % and the Shorts UI at the bottom / right).
+        self.portrait = self.h > self.w
+        self.s = (self.w / 1080.0) if self.portrait else (self.h / 1080.0)
+        self.margin = int(self.w * (0.08 if self.portrait else style.long_rules()["text"]["safe_margin"]))
+        self.cy = int(self.h * 0.36) if self.portrait else self.h // 2
         self.bg = Image.new("RGBA", self.size, _rgba("background"))
+        self.backdrop = bd.Backdrop(self.size, seed=bd.seed_for(type(self).__name__, self._seed_text()),
+                                    image=self.spec.get("backdrop_image"))
+
+    def _seed_text(self):
+        return "|".join(str(self.spec.get(k, "")) for k in ("kind", "text", "title", "value", "nodes", "code"))
+
+    def bg_frame(self, t):
+        """Living background (drifting gradient + grid + particles, or a blurred topic still): RGBA."""
+        return self.backdrop.frame(t)
 
     def px(self, v):
         return max(1, int(round(v * self.s)))
@@ -61,7 +76,9 @@ class _Base:
     def draw_tag(self, img, text, y=None, color="lime"):
         """Left-edge lime bar + mono uppercase label (DYPOL label system)."""
         d = ImageDraw.Draw(img)
-        x, y = self.margin, self.px(72) if y is None else y
+        x = self.margin
+        if y is None:
+            y = int(self.h * 0.12) if self.portrait else self.px(72)
         f = self.font("mono", 30, 600)
         bar = style.look()["label_bar_px"]
         th = self.px(36)
@@ -145,10 +162,10 @@ class CodePanelSource(_Base):
         # panel geometry
         n = len(self.lines)
         ph = self.px(64) + self.px(48) * 2 + self.lh * n
-        ph = min(ph, self.h - self.px(260))
-        pw = int(self.w * 0.80)
-        self.box = ((self.w - pw) // 2, (self.h - ph) // 2 + self.px(30), (self.w + pw) // 2,
-                    (self.h + ph) // 2 + self.px(30))
+        ph = min(ph, (int(self.h * 0.42) if self.portrait else self.h - self.px(260)))
+        pw = int(self.w * (0.86 if self.portrait else 0.80))
+        top = self.cy - ph // 2 + self.px(30)
+        self.box = ((self.w - pw) // 2, top, (self.w + pw) // 2, top + ph)
         self.gutter = 0 if self.terminal else self.px(80)
         self.prompt = "$ " if self.terminal else ""
         self.text_x = self.box[0] + self.px(44) + self.gutter
@@ -168,7 +185,7 @@ class CodePanelSource(_Base):
         self.hl = hl - 1
 
     def _base(self):
-        img = self.bg.copy()
+        img = Image.new("RGBA", self.size, (0, 0, 0, 0))     # drawn over the living backdrop each frame
         self.draw_tag(img, "Terminal" if self.terminal else "Code")
         d = ImageDraw.Draw(img)
         x0, y0, x1, y1 = self.box
@@ -211,11 +228,10 @@ class CodePanelSource(_Base):
 
     def frame(self, local_t):
         t = local_t
-        img = self.base.copy()
+        img = self.bg_frame(t)
         a = ease_out(t / 0.35)
-        if a < 1:
-            fade = Image.new("RGBA", self.size, _rgba("background", int(255 * (1 - a))))
-            img = Image.alpha_composite(img, fade)
+        # the editor window slides up into place while it fades in
+        img.alpha_composite(_alpha(self.base, a), (0, int(self.px(40) * (1 - a))))
         # characters typed so far (each line also costs a short "enter" pause)
         budget = max(0.0, t - self.t0)
         cur_line, cur_chars = 0, 0
@@ -267,7 +283,9 @@ class CodePanelSource(_Base):
 # ------------------------------------------------------------------ diagram
 
 class DiagramSource(_Base):
-    """2-5 nodes connected by arrows that build step by step; a pulse then travels the chain."""
+    """2-5 nodes (icon + label) connected by arrows that draw step by step; then data packets
+    travel the chain continuously and the node they reach lights up. Horizontal in 16:9,
+    vertical in 9:16."""
 
     def __init__(self, spec, size, span):
         super().__init__(spec, size, span)
@@ -277,15 +295,28 @@ class DiagramSource(_Base):
         while len(nodes) < cfg["min_nodes"]:
             nodes.append("Result" if nodes else "Input")
         self.nodes = nodes
+        given = self.spec.get("icons") or []
+        self.icon_names = [given[k] if k < len(given) and given[k] in icons.NAMES else icons.pick_icon(lbl, k)
+                           for k, lbl in enumerate(nodes)]
         n = len(nodes)
-        gap = self.px(110)
-        avail = self.w - 2 * self.margin - gap * (n - 1)
-        bw = min(self.px(380), avail // n)
-        bh = self.px(170)
-        total = bw * n + gap * (n - 1)
-        x = (self.w - total) // 2
-        y = (self.h - bh) // 2 + self.px(40)
-        self.boxes = [(x + k * (bw + gap), y, x + k * (bw + gap) + bw, y + bh) for k in range(n)]
+        if self.portrait:
+            gap = self.px(70)
+            top, bottom = int(self.h * 0.17), int(self.h * 0.56)
+            bh = min(self.px(210), (bottom - top - gap * (n - 1)) // n)
+            bw = int(self.w * 0.70)
+            total = bh * n + gap * (n - 1)
+            x = (self.w - bw) // 2
+            y = top + (bottom - top - total) // 2
+            self.boxes = [(x, y + k * (bh + gap), x + bw, y + k * (bh + gap) + bh) for k in range(n)]
+        else:
+            gap = self.px(110)
+            avail = self.w - 2 * self.margin - gap * (n - 1)
+            bw = min(self.px(380), avail // n)
+            bh = self.px(230)
+            total = bw * n + gap * (n - 1)
+            x = (self.w - total) // 2
+            y = (self.h - bh) // 2 + self.px(30)
+            self.boxes = [(x + k * (bw + gap), y, x + k * (bw + gap) + bw, y + bh) for k in range(n)]
         self.base = self._base()
         self.node_imgs = [(self._node(k, False), self._node(k, True)) for k in range(n)]
         steps = 2 * n - 1
@@ -294,17 +325,7 @@ class DiagramSource(_Base):
         self.t0 = 0.25
 
     def _base(self):
-        img = self.bg.copy()
-        grid = style.look()["grid"]
-        layer = Image.new("RGBA", self.size, (0, 0, 0, 0))
-        d = ImageDraw.Draw(layer)
-        a = int(255 * grid["opacity"])
-        sp = self.px(grid["spacing_px"])
-        for gx in range(0, self.w, sp):
-            d.line([(gx, 0), (gx, self.h)], fill=_rgba("body", a), width=1)
-        for gy in range(0, self.h, sp):
-            d.line([(0, gy), (self.w, gy)], fill=_rgba("body", a), width=1)
-        img = Image.alpha_composite(img, layer)
+        img = Image.new("RGBA", self.size, (0, 0, 0, 0))
         self.draw_tag(img, self.spec.get("title") or "How it works", color="cyan")
         return img
 
@@ -317,49 +338,87 @@ class DiagramSource(_Base):
         r = self.px(style.look()["panel_radius_px"])
         if active:
             d.rounded_rectangle([0, 0, w + 2 * pad - 1, h + 2 * pad - 1], radius=r + pad, fill=_rgba("lime", 34))
-        d.rounded_rectangle([pad, pad, pad + w - 1, pad + h - 1], radius=r, fill=_rgba("panel"),
+        d.rounded_rectangle([pad, pad, pad + w - 1, pad + h - 1], radius=r, fill=_rgba("panel", 236),
                             outline=_rgba("lime" if active else "border"), width=self.px(3) if active else self.px(2))
         d.text((pad + self.px(20), pad + self.px(22)), f"{k + 1:02d}", font=self.font("mono", 24, 500),
                fill=_rgba("lime" if active else "cyan"), anchor="lt")
+        icon_c = _rgba("lime" if active else "cyan")
+        if self.portrait:
+            isz = min(h - self.px(60), self.px(110))
+            ib = (pad + self.px(70), pad + (h - isz) / 2, pad + self.px(70) + isz, pad + (h + isz) / 2)
+            text_x0, text_w = ib[2] + self.px(30), w - (ib[2] - pad) - self.px(50)
+            text_cy = pad + h / 2
+        else:
+            isz = self.px(78)
+            ib = (pad + (w - isz) / 2, pad + self.px(30), pad + (w + isz) / 2, pad + self.px(30) + isz)
+            text_x0, text_w = pad + self.px(18), w - self.px(36)
+            text_cy = pad + self.px(30) + isz + (h - self.px(30) - isz) / 2
+        icons.draw_icon(d, self.icon_names[k], ib, icon_c, width=max(2, self.px(5)))
         label = self.nodes[k]
-        f = _fit_font("headline", label, w - self.px(36), 46, 26, 600, self.s)
+        f = _fit_font("headline", label, text_w, 46 if not self.portrait else 58, 26, 600, self.s)
         words, lines = label.split(), [""]
         for word in words:
             trial = (lines[-1] + " " + word).strip()
-            if f.getlength(trial) <= w - self.px(36) or not lines[-1]:
+            if f.getlength(trial) <= text_w or not lines[-1]:
                 lines[-1] = trial
             else:
                 lines.append(word)
         lines = lines[:2]
         lh = f.size * 1.15
-        cy = pad + h / 2 + self.px(14) - lh * (len(lines) - 1) / 2
+        cy = text_cy - lh * (len(lines) - 1) / 2
         for i, line in enumerate(lines):
-            d.text((pad + w / 2, cy + i * lh), line, font=f, fill=_rgba("body"), anchor="mm")
+            if self.portrait:
+                d.text((text_x0, cy + i * lh), line, font=f, fill=_rgba("body"), anchor="lm")
+            else:
+                d.text((text_x0 + text_w / 2, cy + i * lh), line, font=f, fill=_rgba("body"), anchor="mm")
         return img
+
+    def _ends(self, k):
+        a, b = self.boxes[k], self.boxes[k + 1]
+        if self.portrait:
+            x = (a[0] + a[2]) / 2
+            return (x, a[3] + self.px(12)), (x, b[1] - self.px(12))
+        y = (a[1] + a[3]) / 2
+        return (a[2] + self.px(14), y), (b[0] - self.px(14), y)
 
     def _arrow(self, img, k, p, color="border"):
         if p <= 0:
             return
         d = ImageDraw.Draw(img)
-        x0 = self.boxes[k][2] + self.px(14)
-        x1 = self.boxes[k + 1][0] - self.px(14)
-        y = (self.boxes[k][1] + self.boxes[k][3]) / 2
-        xe = x0 + (x1 - x0) * p
-        d.line([(x0, y), (xe, y)], fill=_rgba(color), width=self.px(4))
+        (x0, y0), (x1, y1) = self._ends(k)
+        xe, ye = x0 + (x1 - x0) * p, y0 + (y1 - y0) * p
+        d.line([(x0, y0), (xe, ye)], fill=_rgba(color), width=self.px(4))
         if p > 0.6:
             hs = self.px(14)
-            d.polygon([(xe, y), (xe - hs * 1.3, y - hs), (xe - hs * 1.3, y + hs)], fill=_rgba(color))
+            if self.portrait:
+                d.polygon([(xe, ye), (xe - hs, ye - hs * 1.3), (xe + hs, ye - hs * 1.3)], fill=_rgba(color))
+            else:
+                d.polygon([(xe, ye), (xe - hs * 1.3, ye - hs), (xe - hs * 1.3, ye + hs)], fill=_rgba(color))
+
+    def _packets(self, img, t, built_arrows):
+        """Glowing data packets travel each drawn arrow continuously (the 'flow')."""
+        d = ImageDraw.Draw(img, "RGBA")
+        for k in range(built_arrows):
+            (x0, y0), (x1, y1) = self._ends(k)
+            for j in range(2):
+                q = ((t * 0.9) + j * 0.5 + k * 0.17) % 1.0
+                x, y = x0 + (x1 - x0) * q, y0 + (y1 - y0) * q
+                for rad, a in ((self.px(16), 60), (self.px(8), 255)):
+                    d.ellipse([x - rad, y - rad, x + rad, y + rad], fill=_rgba("lime", a))
 
     def frame(self, local_t):
         t = local_t - self.t0
-        img = self.base.copy()
+        img = self.bg_frame(local_t)
+        img.alpha_composite(self.base)
         n = len(self.nodes)
         built = t / self.step if self.step else 99
         active = min(n - 1, max(0, int(built // 2)))
         complete = t >= self.build
+        drawn = 0
         for k in range(n - 1):
-            self._arrow(img, k, ease_in_out((t - (2 * k + 1) * self.step) / (self.step * 0.9)),
-                        color="cyan" if complete or k < active else "muted")
+            p = ease_in_out((t - (2 * k + 1) * self.step) / (self.step * 0.9))
+            self._arrow(img, k, p, color="cyan" if complete or k < active else "muted")
+            drawn += p >= 1
         for k in range(n):
             p = ease_out((t - 2 * k * self.step) / 0.35)
             if p <= 0:
@@ -371,8 +430,14 @@ class DiagramSource(_Base):
                 is_active = int(((t - self.build) % cycle) / cycle * n) == k
             node = self.node_imgs[k][1 if is_active else 0]
             pad = self.px(12)
-            x, y = self.boxes[k][0] - pad, self.boxes[k][1] - pad + int(self.px(24) * (1 - p))
+            bob = int(self.px(5) * math.sin(local_t * 1.6 + k * 1.3)) if p >= 1 else 0
+            if self.portrait:
+                x, y = self.boxes[k][0] - pad + int(self.px(60) * (1 - p)), self.boxes[k][1] - pad
+                x += bob
+            else:
+                x, y = self.boxes[k][0] - pad, self.boxes[k][1] - pad + int(self.px(24) * (1 - p)) + bob
             img.alpha_composite(_alpha(node, p), (x, y))
+        self._packets(img, local_t, drawn)
         return img.convert("RGB")
 
 
@@ -412,7 +477,7 @@ class ChapterCardSource(_Base):
 
     def frame(self, local_t):
         t = local_t
-        img = self.base.copy()
+        img = self.bg_frame(t)
         cy = self.h // 2
         # number slides in from the left
         p = ease_out(t / 0.45)
@@ -485,7 +550,8 @@ class KineticTextSource(_Base):
             cur = cur + (sp if lines[-1] else 0) + wl
             lines[-1].append(i)
         lh = int(self.f.size * 1.2)
-        top = self.h / 2 - lh * len(lines) / 2
+        top = self.cy - lh * len(lines) / 2
+        self.text_bottom = top + lh * len(lines)
         self.pos = {}
         for li, idxs in enumerate(lines):
             width = sum(self.f.getlength(self.words[i]) for i in idxs) + sp * (len(idxs) - 1)
@@ -495,20 +561,64 @@ class KineticTextSource(_Base):
                 x += self.f.getlength(self.words[i]) + sp
         self.imgs = [ChapterCardSource._text_img(wd, self.f, "body") for wd in self.words]
         self.tag = self.spec.get("label") or ""
+        self.accent = "amber" if str(self.tag).lower().startswith(("the catch", "catch", "but")) else "lime"
+        # a small icon chip slides in and floats; a comet travels a rail under the words (flow)
+        self.icon_name = self.spec.get("icon") if self.spec.get("icon") in icons.NAMES else \
+            icons.pick_icon(f"{self.tag} {text}")
+        isz = self.px(150)
+        self.chip = Image.new("RGBA", (isz, isz), (0, 0, 0, 0))
+        cd = ImageDraw.Draw(self.chip)
+        cd.rounded_rectangle([0, 0, isz - 1, isz - 1], radius=self.px(28), fill=_rgba("panel", 230),
+                             outline=_rgba(self.accent), width=self.px(3))
+        icons.draw_icon(cd, self.icon_name, (isz * 0.22, isz * 0.22, isz * 0.78, isz * 0.78), _rgba(self.accent),
+                        width=max(2, self.px(6)))
+
+    def _flow(self, img, t, drift):
+        d = ImageDraw.Draw(img, "RGBA")
+        # rail under the text draws in, then a comet travels it continuously
+        y = self.text_bottom + self.px(40) - drift
+        x0, x1 = self.margin + self.px(40), self.w - self.margin - self.px(40)
+        rp = ease_in_out((t - 0.2) / 0.6)
+        if rp > 0:
+            d.line([(x0, y), (x0 + (x1 - x0) * rp, y)], fill=_rgba("border", 255), width=self.px(3))
+        if rp >= 1:
+            q = ((t - 0.8) * 0.45) % 1.0
+            cx = x0 + (x1 - x0) * q
+            for k in range(8):
+                tx = cx - k * self.px(18)
+                if tx < x0:
+                    break
+                d.line([(tx, y), (tx - self.px(18), y)], fill=_rgba(self.accent, int(230 * (1 - k / 8))),
+                       width=self.px(5))
+            rr = self.px(9)
+            d.ellipse([cx - rr, y - rr, cx + rr, y + rr], fill=_rgba(self.accent))
+        # icon chip slides in from the right edge and floats
+        cp = ease_out((t - 0.35) / 0.5)
+        if cp > 0:
+            if self.portrait:
+                bx = self.w - self.margin - self.chip.width
+                by = int(self.h * 0.12) + self.px(70)
+            else:
+                bx = self.w - self.margin - self.chip.width
+                by = self.px(140)
+            bx += int(self.px(220) * (1 - cp))
+            by += int(self.px(10) * math.sin(t * 1.5))
+            img.alpha_composite(_alpha(self.chip, cp), (bx, by))
 
     def frame(self, local_t):
         t = local_t
-        img = self.bg.copy()
+        img = self.bg_frame(t)
         if self.tag:
-            self.draw_tag(img, self.tag)
+            self.draw_tag(img, self.tag, color=self.accent)
         drift = int(self.px(14) * ease_in_out(t / self.span))
+        self._flow(img, t, drift)
         all_in = 0.1 + 0.16 * len(self.words) + 0.2
         hp = ease_in_out((t - all_in) / 0.3)
         if hp > 0:
             x, y, wl, lh = self.pos[self.key]
             ImageDraw.Draw(img).rectangle([x - self.px(14), y + lh * 0.12 - drift,
                                            x - self.px(14) + (wl + self.px(28)) * hp, y + lh * 0.95 - drift],
-                                          fill=_rgba("lime", 255))
+                                          fill=_rgba(self.accent, 255))
         for i, wimg in enumerate(self.imgs):
             p = ease_out((t - 0.1 - 0.16 * i) / 0.25)
             if p <= 0:
@@ -547,9 +657,30 @@ class CountUpSource(_Base):
         self.source = str(self.spec.get("source") or "")
         self.sf = self.font("mono", 26, 400)
 
+    def _meter(self, img, t, p, y):
+        """A segmented meter fills with the count (share of 100 for a %); a glint keeps sweeping it."""
+        frac = min(1.0, self.value / 100.0) if self.suffix == "%" else 1.0
+        d = ImageDraw.Draw(img, "RGBA")
+        x0, x1 = self.margin + self.px(60), self.w - self.margin - self.px(60)
+        my = y - self.f.size - self.px(50)
+        segs = 24
+        gap = self.px(6)
+        sw = (x1 - x0 - gap * (segs - 1)) / segs
+        lit = frac * p * segs
+        for k in range(segs):
+            a = x0 + k * (sw + gap)
+            on = k < lit
+            d.rounded_rectangle([a, my, a + sw, my + self.px(14)], radius=self.px(4),
+                                fill=_rgba("lime" if on else "border", 255 if on else 200))
+        if p > 0.95:
+            q = ((t * 0.5) % 1.0)
+            gx = x0 + (x1 - x0) * frac * q
+            d.ellipse([gx - self.px(14), my - self.px(7), gx + self.px(14), my + self.px(21)],
+                      fill=_rgba("body", 150))
+
     def frame(self, local_t):
         t = local_t
-        img = self.bg.copy()
+        img = self.bg_frame(t)
         self.draw_tag(img, self.spec.get("title") or "By the numbers")
         d = ImageDraw.Draw(img)
         drift = int(self.px(12) * ease_in_out(t / self.span))
@@ -557,7 +688,9 @@ class CountUpSource(_Base):
         cur = self.value * p
         num = format_number(cur, self.dec)
         x = (self.w - self.final_w) / 2
-        y = self.h / 2 - self.px(70) - drift
+        y = self.cy - self.px(70) - drift
+        self._meter(img, t, p, y)
+        d = ImageDraw.Draw(img)
         d.text((x, y), self.prefix, font=self.f, fill=_rgba("body"), anchor="ls")
         x += self.f.getlength(self.prefix)
         d.text((x, y), num, font=self.f, fill=_rgba("lime"), anchor="ls")
@@ -565,7 +698,7 @@ class CountUpSource(_Base):
         d.text((x, y), self.suffix, font=self.f, fill=_rgba("body"), anchor="ls")
         if self.label:
             lp = ease_out((t - 0.5) / 0.35)
-            ly = self.h / 2 + self.px(60) - drift + int(self.px(20) * (1 - lp))
+            ly = self.cy + self.px(60) - drift + int(self.px(20) * (1 - lp))
             lw = self.lf.getlength(self.label)
             hp = ease_in_out((t - 1.15) / 0.3)
             if hp > 0:
@@ -579,9 +712,144 @@ class CountUpSource(_Base):
         if self.source:
             sp = ease_out((t - 0.8) / 0.4)
             layer = Image.new("RGBA", self.size, (0, 0, 0, 0))
-            ImageDraw.Draw(layer).text((self.margin, self.h - self.px(80)), f"Source: {self.source}", font=self.sf,
+            sy = int(self.h * 0.56) if self.portrait else self.h - self.px(80)
+            ImageDraw.Draw(layer).text((self.margin, sy), f"Source: {self.source}", font=self.sf,
                                        fill=_rgba("muted"), anchor="ls")
             img.alpha_composite(_alpha(layer, sp))
+        return img.convert("RGB")
+
+
+# ------------------------------------------------------------------ icon_flow
+
+def _bezier(p0, p1, p2, p3, n=48):
+    pts = []
+    for i in range(n + 1):
+        u = i / n
+        a, b, c, e = (1 - u) ** 3, 3 * u * (1 - u) ** 2, 3 * u * u * (1 - u), u ** 3
+        pts.append((a * p0[0] + b * p1[0] + c * p2[0] + e * p3[0], a * p0[1] + b * p1[1] + c * p2[1] + e * p3[1]))
+    return pts
+
+
+class IconFlowSource(_Base):
+    """2-4 icon cards slide in along a curved path; the path draws itself, then a glowing token
+    travels card to card continuously and each card pops as it arrives (a visual, not a text card)."""
+
+    def __init__(self, spec, size, span):
+        super().__init__(spec, size, span)
+        labels = [str(x).strip() for x in (self.spec.get("nodes") or []) if str(x).strip()][:4]
+        if len(labels) < 2:
+            words = [wd for wd in str(self.spec.get("text") or "").split() if len(wd) > 2][:3]
+            labels = (labels + words + ["Input", "Output"])[:max(2, len(labels) + len(words))][:4]
+            if len(labels) < 2:
+                labels = ["Input", "Output"]
+        self.labels = labels
+        given = self.spec.get("icons") or []
+        self.icon_names = [given[k] if k < len(given) and given[k] in icons.NAMES else icons.pick_icon(lbl, k + 1)
+                           for k, lbl in enumerate(labels)]
+        n = len(labels)
+        self.card = self.px(250 if self.portrait else 220)
+        if self.portrait:
+            top, bottom = int(self.h * 0.25), int(self.h * 0.48)
+            ys = [top + (bottom - top) * (k / max(1, n - 1)) for k in range(n)] if n > 1 else [self.cy]
+            xs = [self.w * (0.30 if k % 2 == 0 else 0.70) for k in range(n)]
+        else:
+            left, right = self.margin + self.px(180), self.w - self.margin - self.px(180)
+            xs = [left + (right - left) * (k / max(1, n - 1)) for k in range(n)]
+            ys = [self.cy + self.px(30) + (self.px(-90) if k % 2 else self.px(90)) for k in range(n)]
+        self.centers = list(zip(xs, ys))
+        self.path = []
+        for k in range(n - 1):
+            (ax, ay), (bx, by) = self.centers[k], self.centers[k + 1]
+            if self.portrait:
+                seg = _bezier((ax, ay), (ax, ay + (by - ay) * 0.6), (bx, by - (by - ay) * 0.6), (bx, by))
+            else:
+                seg = _bezier((ax, ay), (ax + (bx - ax) * 0.55, ay), (bx - (bx - ax) * 0.55, by), (bx, by))
+            self.path.extend(seg if not self.path else seg[1:])
+        self.cum = [0.0]
+        for (x0, y0), (x1, y1) in zip(self.path, self.path[1:]):
+            self.cum.append(self.cum[-1] + math.hypot(x1 - x0, y1 - y0))
+        self.length = max(1.0, self.cum[-1])
+        self.card_at = []
+        for c in self.centers:
+            best = min(range(len(self.path)), key=lambda i: math.hypot(self.path[i][0] - c[0], self.path[i][1] - c[1]))
+            self.card_at.append(self.cum[best] / self.length)
+        self.cards = [(self._card(k, False), self._card(k, True)) for k in range(n)]
+        self.lf = _fit_font("headline", max(labels, key=len), self.card + self.px(120), 44, 26, 600, self.s)
+        self.title = str(self.spec.get("title") or "")
+        self.t_in = 0.25
+        self.step = min(0.45, max(0.25, self.span * 0.5 / n))
+
+    def _card(self, k, hot):
+        c = self.card
+        pad = self.px(14)
+        img = Image.new("RGBA", (c + 2 * pad, c + 2 * pad), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        r = self.px(30)
+        if hot:
+            d.rounded_rectangle([0, 0, c + 2 * pad - 1, c + 2 * pad - 1], radius=r + pad, fill=_rgba("lime", 46))
+        d.rounded_rectangle([pad, pad, pad + c - 1, pad + c - 1], radius=r, fill=_rgba("panel", 238),
+                            outline=_rgba("lime" if hot else "border"), width=self.px(3))
+        icons.draw_icon(d, self.icon_names[k], (pad + c * 0.24, pad + c * 0.24, pad + c * 0.76, pad + c * 0.76),
+                        _rgba("lime" if hot else "cyan"), width=max(2, self.px(7)))
+        return img
+
+    def _point(self, q):
+        target = q * self.length
+        lo, hi = 0, len(self.cum) - 1
+        while lo < hi - 1:
+            mid = (lo + hi) // 2
+            if self.cum[mid] <= target:
+                lo = mid
+            else:
+                hi = mid
+        seg = max(1e-6, self.cum[hi] - self.cum[lo])
+        u = (target - self.cum[lo]) / seg
+        (x0, y0), (x1, y1) = self.path[lo], self.path[hi]
+        return x0 + (x1 - x0) * u, y0 + (y1 - y0) * u
+
+    def frame(self, local_t):
+        t = local_t
+        img = self.bg_frame(t)
+        self.draw_tag(img, self.title or "Flow", color="cyan")
+        d = ImageDraw.Draw(img, "RGBA")
+        n = len(self.labels)
+        # the path draws itself (dashed), card by card
+        drawn = ease_in_out((t - self.t_in) / max(0.3, self.step * n))
+        upto = drawn * self.length
+        dash, gapl = self.px(22), self.px(14)
+        pos = 0.0
+        while pos < upto:
+            a, b = self._point(pos / self.length), self._point(min(upto, pos + dash) / self.length)
+            d.line([a, b], fill=_rgba("muted", 220), width=self.px(5))
+            pos += dash + gapl
+        # token travels continuously once the path is down; trailing glow
+        token_q = None
+        if drawn >= 1:
+            token_q = ((t - self.t_in - self.step * n) * 0.32) % 1.0
+            for k in range(10, -1, -1):
+                q = token_q - k * 0.012
+                if q < 0:
+                    continue
+                x, y = self._point(q)
+                rad = self.px(16) * (1 - k / 13)
+                d.ellipse([x - rad, y - rad, x + rad, y + rad], fill=_rgba("lime", int(255 * (1 - k / 11))))
+        for k in range(n):
+            p = ease_out((t - self.t_in - k * self.step) / 0.4)
+            if p <= 0:
+                continue
+            hot = token_q is not None and abs(token_q - self.card_at[k]) < 0.07
+            card = self.cards[k][1 if hot else 0]
+            cx, cy = self.centers[k]
+            cy += self.px(8) * math.sin(t * 1.4 + k)
+            if self.portrait:
+                cx += (-1 if k % 2 == 0 else 1) * self.px(200) * (1 - p)
+            else:
+                cy += self.px(120) * (1 - p)
+            img.alpha_composite(_alpha(card, p), (int(cx - card.width / 2), int(cy - card.height / 2)))
+            lp = ease_out((t - self.t_in - k * self.step - 0.2) / 0.35)
+            if lp > 0:
+                ImageDraw.Draw(img, "RGBA").text((cx, cy + card.height / 2 + self.px(14)), self.labels[k],
+                                                 font=self.lf, fill=_rgba("body", int(255 * lp)), anchor="mt")
         return img.convert("RGB")
 
 
@@ -593,7 +861,10 @@ SOURCES = {
     "chapter_card": ChapterCardSource,
     "kinetic_text": KineticTextSource,
     "count_up": CountUpSource,
+    "icon_flow": IconFlowSource,
 }
+
+TEXT_DOMINANT = ("kinetic_text", "chapter_card")
 
 
 def is_block(asset):

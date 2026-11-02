@@ -15,7 +15,7 @@ from src import pacing
 LONG_SIZE = (1920, 1080)
 SHORT_SIZE = (1080, 1920)
 SLIDE_PAD = 0.45          # seconds of breathing room after each slide's narration
-SHORT_MIN, SHORT_MAX = 20.0, 45.0
+SHORT_MIN, SHORT_MAX = 50.0, 65.0     # a real Short: hook, 2-3 beats, the catch, a takeaway
 
 MANIFEST_FIELDS = ("provider", "source_url", "asset_id", "license", "license_url", "sha256")
 
@@ -218,8 +218,8 @@ def _assign(timeline, per_slide_assets, size, out_dir, label, fixed=None):
     return shot_assets, manifest
 
 
-RUN_CAP = {"chapter_card": 1, "count_up": 1, "kinetic_text": 1, "code_panel": 3, "diagram": 3}
-SPAN_KINDS = ("code_panel", "diagram")     # may run on across cuts: they animate throughout
+RUN_CAP = {"chapter_card": 1, "count_up": 1, "kinetic_text": 1, "code_panel": 3, "diagram": 3, "icon_flow": 2}
+SPAN_KINDS = ("code_panel", "diagram", "icon_flow")     # may run on across cuts: they animate throughout
 
 
 def _max_block_span():
@@ -302,6 +302,7 @@ def plan_blocks(timeline, slides, out_dir=None, size=LONG_SIZE, label="long", wo
     except Exception as exc:  # noqa: BLE001 - the mix pass must never lose a render
         _log(f"{label}: shot-mix enforcement failed ({exc}); keeping the planned mix")
     _govern_runs(timeline, slides, fixed, kinds, out_dir, size, label, words=words)
+    _govern_text(timeline, slides, fixed, kinds, out_dir, size, label, words=words)
     return fixed, kinds
 
 
@@ -330,12 +331,40 @@ def spoken_number(words):
             continue
         if not suffix and not prefix and ("." not in value) and (1900 <= number <= 2100 or number < 3):
             continue
-        label = " ".join(w.strip(".,;:!?()\"'“”") for w in words[k + 1 + (1 if nxt in ("percent", "per-cent") and
-                                                                              suffix == "%" else 0):][:4])
+        rest = words[k + 1 + (1 if nxt in ("percent", "per-cent") and suffix == "%" else 0):]
         spec = {"kind": "count_up", "value": value, "prefix": prefix, "suffix": suffix.lower() if suffix != "%" else "%",
-                "label": sb.clamp_bullet(label, 4) or "", "keywords": [], "fallback": "kinetic_text"}
+                "label": number_label(rest), "keywords": [], "fallback": "kinetic_text"}
         return spec
     return None
+
+
+_LABEL_BREAK = {"means", "mean", "is", "are", "was", "were", "be", "that", "which", "who", "to", "and", "but", "so",
+                "because", "if", "when", "while", "then", "than", "will", "can", "could", "would", "should",
+                "it", "this", "they", "we", "you", "has", "have", "had", "do", "does", "did"}
+_LABEL_LEAD = {"of", "the", "a", "an", "in", "on", "at", "for", "per", "out", "about", "over", "nearly", "almost",
+               "roughly", "around", "more", "less"}
+
+
+def number_label(rest, max_words=4):
+    """What a spoken number counts, as a label that reads alone: the noun phrase right after it.
+
+    "512 dimensions for every word ..." -> "Dimensions for every word"; "0.0 means complete" -> ""
+    (a verb straight after the number: no label, the caller falls back to the slide title)."""
+    out = []
+    for raw in rest:
+        tok = str(raw).strip("()\"'“”")
+        bare = tok.strip(".,;:!?").lower()
+        if not bare or bare in _LABEL_BREAK or re.match(r"^\d", bare):
+            break
+        out.append(tok.strip(".,;:!?"))
+        if len(out) >= max_words or tok.endswith((".", ",", ";", ":", "!", "?")):
+            break
+    while out and out[-1].lower() in _KEY_STOP | _LABEL_LEAD:
+        out.pop()
+    if sum(w.lower() not in _KEY_STOP | _LABEL_LEAD for w in out) < 2:
+        return ""
+    label = " ".join(out)
+    return label[:1].upper() + label[1:]
 
 
 def _spoken(timeline, words, g):
@@ -618,6 +647,92 @@ def _govern_runs(timeline, slides, fixed, kinds, out_dir, size, label, words=Non
                         kinds[g] = shotlist.STILL
 
 
+def flow_spec(slide, said=(), text=""):
+    """An icon_flow (visual) spec for a beat: nodes from the slide's bullets, else the spoken key phrase."""
+    bullets = [sb.clamp_bullet(b, 2) for b in (slide.get("bullets") or []) if b]
+    nodes = [b for b in bullets if b][:3]
+    if len(nodes) < 2:
+        phrase = key_phrase(list(said)) or text or slide.get("title", "")
+        nodes = [w.strip(".,;:!?").capitalize() for w in str(phrase).split()
+                 if w.strip(".,;:!?").casefold() not in _KEY_STOP and len(w) > 1][:3]
+    if len(nodes) < 2:
+        nodes = (nodes + [sb.clamp_bullet(slide.get("title", ""), 2) or "Input", "Result"])[:3]
+    return {"kind": "icon_flow", "nodes": nodes, "title": sb.clamp_bullet(slide.get("title", ""), 4) or "How it flows",
+            "keywords": [], "fallback": "kinetic_text"}
+
+
+def _govern_text(timeline, slides, fixed, kinds, out_dir, size, label, words=None):
+    """At most 2 text-dominant blocks (kinetic_text, chapter_card) in a row: the 3rd (or, when the
+    3rd is a chapter card, the 2nd) kinetic_text becomes an icon_flow, a moving visual."""
+    from src import blocks
+    text = set(blocks.TEXT_DOMINANT)
+    windows = ex.shot_windows(timeline)
+    keep = {0, len(slides) - 1} if len(slides) > 2 else set()
+    for _ in range(len(kinds) + 1):
+        units = _units(kinds, fixed)
+        run, bad = 0, None
+        for u, (k, _) in enumerate(units):
+            run = run + 1 if k in text else 0
+            if run >= 3:
+                bad = u
+                break
+        if bad is None:
+            return
+        cands = [u for u in (bad, bad - 1) if units[u][0] == "kinetic_text"]
+        cands.sort(key=lambda u: timeline["shots"][units[u][1][0]]["slide"] in keep)
+        if not cands:
+            _log(f"{label}: 3 text blocks in a row at shot {units[bad][1][0]} (none convertible)")
+            return
+        idx = units[cands[0]][1]
+        g = idx[0]
+        slide_i = timeline["shots"][g]["slide"]
+        slide = slides[slide_i] if slide_i < len(slides) else {}
+        old_text = (fixed.get(g, {}).get("spec") or {}).get("text", "")
+        spec = flow_spec(slide, _spoken(timeline, words, g), old_text)
+        span = windows[idx[-1]][1] - windows[idx[0]][0]
+        preview = Path(out_dir) / f"{label}_flow_{g}.png" if out_dir is not None else None
+        try:
+            asset = blocks.block_asset(spec, preview, size=size, span=span)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"{label}: icon_flow for shot {g} failed ({exc})")
+            return
+        bid = f"{label}_flow_{g}"
+        for m in idx:
+            fixed[m] = dict(asset, block_id=bid, block_span=span, block_offset=round(windows[m][0] - windows[g][0], 4))
+            kinds[m] = "icon_flow"
+
+
+def text_runs(kinds, fixed):
+    """Longest run of text-dominant units (style check: must be <= 2)."""
+    from src import blocks
+    best = run = 0
+    for k, _ in _units(kinds, fixed):
+        run = run + 1 if k in blocks.TEXT_DOMINANT else 0
+        best = max(best, run)
+    return best
+
+
+def apply_backdrops(timeline, fixed, per_slide_assets, kinds_with_photo=("kinetic_text", "count_up", "chapter_card")):
+    """Give text blocks a living photo backdrop: the slide's own topic still, blurred + darkened (Ken Burns)."""
+    used = 0
+    for sl in timeline["slides"]:
+        imgs = [a for a in (per_slide_assets[sl["index"]] if sl["index"] < len(per_slide_assets) else [])
+                if a.get("kind") == "image" and _is_real(a) and Path(a.get("path", "")).exists()]
+        if not imgs:
+            continue
+        seen = set()
+        for j, g in enumerate(g for g in sl["shots"] if g in fixed):
+            asset = fixed[g]
+            if asset.get("block") not in kinds_with_photo or asset.get("block_id") in seen:
+                continue
+            seen.add(asset.get("block_id"))
+            pick = imgs[len(seen) % len(imgs)]
+            asset.setdefault("spec", {})["backdrop_image"] = pick["path"]
+            asset["backdrop_source_url"] = pick.get("source_url", "")
+            used += 1
+    return used
+
+
 def _manifest_blocks(fixed, timeline, label, shot_assets, manifest):
     by_id = {}
     for g, asset in sorted(fixed.items()):
@@ -627,6 +742,8 @@ def _manifest_blocks(fixed, timeline, label, shot_assets, manifest):
         asset = fixed[shots[0]]
         entry = manifest_entry(asset, label, timeline["shots"][shots[0]]["slide"] + 1, shots, timeline)
         entry["kind"] = f"block:{asset['block']}"
+        if asset.get("backdrop_source_url"):
+            entry["backdrop_source_url"] = asset["backdrop_source_url"]
         manifest.append(entry)
 
 
@@ -644,25 +761,26 @@ def style_report(kinds, fixed, timeline=None):
         report["pacing"] = pacing.stats(timeline)
     report["kinds"] = {k: kinds.count(k) for k in sorted(set(kinds))}
     report["runs_over_limit"] = shotlist.runs_over(units, shotlist.max_run())
+    report["max_text_run"] = text_runs(kinds, fixed)
     variety = style.long_rules()["variety"]
     report["demo_share_ok"] = report["demo_share"] >= variety["min_demo_share"]
     report["still_share_ok"] = report["still_share"] <= variety["max_still_share"]
     return report
 
 
-def _sound_design(timeline, kinds, fixed, narration, out_dir):
+def _sound_design(timeline, kinds, fixed, narration, out_dir, label="long"):
     """SFX track (whoosh/pop on block changes, clicks while code types); (None, summary) on any failure."""
     try:
         from src import sfx
         if not sfx.available():
             return None, {"enabled": False, "reason": "sfx files missing"}
         events = sfx.plan(timeline, kinds, fixed, seed=len(timeline["shots"]))
-        path = sfx.build_track(events, timeline["total"], Path(out_dir) / "sfx_long.wav", narration)
+        path = sfx.build_track(events, timeline["total"], Path(out_dir) / f"sfx_{label}.wav", narration)
         hits = [e for e in events if not e.get("click")]
         summary = {"enabled": bool(path), "hits": len(hits), "clicks": len(events) - len(hits),
                    "hits_per_min": sfx.per_minute(events, timeline["total"]),
                    "clips": sorted({e["clip"] for e in hits}), "license": "CC0 1.0 (Kenney), see sfx/LICENSES.md"}
-        _log(f"long: sfx {json.dumps(summary)}")
+        _log(f"{label}: sfx {json.dumps(summary)}")
         return path, summary
     except Exception as exc:  # noqa: BLE001 - sound design never blocks a render
         _log(f"long: sfx skipped ({exc})")
@@ -725,6 +843,8 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
         per_slide_assets.append(assets)
         bullet_times.append(sb.bullet_reveal_times(slide.get("bullets", []), words, sl["end"] - sl["start"]))
         caption_segments.append((sl["start"], words))
+    photo_backdrops = apply_backdrops(timeline, fixed, per_slide_assets)
+    _log(f"long: {photo_backdrops} text blocks on a blurred topic-still backdrop; the rest on the drifting field")
     shot_assets, manifest = _assign(timeline, per_slide_assets, LONG_SIZE, out_dir, "long", fixed=fixed)
     style_check = style_report(kinds, fixed, timeline)
     _log(f"long: style check {json.dumps(style_check)}")
@@ -761,36 +881,246 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
                              and not a.get("borrowed")]}
 
 
-def fit_short_audio(tts_fn, script, cta, work_dir):
-    """TTS the Short and force its length into 20-45 s (hook-first, silence trimmed)."""
+def fit_short_audio(tts_fn, script, cta, work_dir, lo=None, hi=None):
+    """TTS the Short and bring it into [lo, hi] s (default 50-65 s): silence trimmed, tempo nudged
+    (at most 10 % slower or 25 % faster), sentences cut once if far too long. `cta` is only
+    appended when given (the DYPOL Short has no CTA)."""
+    lo = SHORT_MIN if lo is None else lo
+    hi = SHORT_MAX if hi is None else hi
     work_dir = Path(work_dir)
     raw = tts_fn(script, work_dir / "short_voice.mp3")
     voice = ex.trim_silence(raw, work_dir / "short_voice_trim.wav")
     dur = ex.audio_duration(voice)
-    if dur < SHORT_MIN and cta and cta not in script:
+    if dur < lo and cta and cta not in script:
         script = f"{script} {cta}"
         raw = tts_fn(script, work_dir / "short_voice_cta.mp3")
         voice = ex.trim_silence(raw, work_dir / "short_voice_cta_trim.wav")
         dur = ex.audio_duration(voice)
-    if dur > SHORT_MAX:
-        factor = dur / (SHORT_MAX - 1.0)
+    if dur < lo:
+        factor = max(0.9, dur / (lo + 0.3))
+        if factor < 0.995:
+            voice = ex.change_tempo(voice, work_dir / "short_voice_slow.wav", factor)
+            _log(f"short: voice {dur:.1f}s < {lo:.0f}s; slowed to x{factor:.2f}")
+    elif dur > hi:
+        factor = dur / (hi - 1.0)
         if factor <= 1.25:
             voice = ex.change_tempo(voice, work_dir / "short_voice_fast.wav", factor)
         else:
             # Far too long for tempo alone: drop the last sentences once, re-voice, then cap tempo.
             sentences = [x for x in script.split(". ") if x]
-            keep = max(1, int(len(sentences) * (SHORT_MAX - 3.0) / dur))
+            keep = max(1, int(len(sentences) * (hi - 3.0) / dur))
             script = ". ".join(sentences[:keep]).rstrip(".") + "."
             raw = tts_fn(script, work_dir / "short_voice_cut.mp3")
             voice = ex.trim_silence(raw, work_dir / "short_voice_cut_trim.wav")
             dur = ex.audio_duration(voice)
-            if dur > SHORT_MAX:
-                voice = ex.change_tempo(voice, work_dir / "short_voice_fast.wav", min(1.25, dur / (SHORT_MAX - 1.0)))
+            if dur > hi:
+                voice = ex.change_tempo(voice, work_dir / "short_voice_fast.wav", min(1.25, dur / (hi - 1.0)))
     return script, voice
 
 
+_SENT = re.compile(r"(?<=[.!?])\s+")
+_CATCH = re.compile(r"\b(but|however|catch|careful|limit|fails?|wrong|halluc|mistake|risk)", re.I)
+
+
+def short_sections(plan, script):
+    """[{role, text, nodes, icons}] covering the script in order: hook, 2-3 beats, catch, takeaway.
+
+    Built from the model's structured plan when its texts add up to the script; otherwise split
+    from the script's sentences (first = hook, last = takeaway, the one with "but/catch" = catch)."""
+    plan = plan if isinstance(plan, dict) else {}
+    secs = []
+    if plan.get("hook"):
+        secs.append({"role": "hook", "text": str(plan["hook"])})
+    for b in plan.get("beats") or []:
+        if isinstance(b, dict) and b.get("text"):
+            secs.append({"role": "beat", "text": str(b["text"]), "nodes": list(b.get("nodes") or []),
+                         "icons": list(b.get("icons") or ([b["icon"]] if b.get("icon") else []))})
+    c = plan.get("catch")
+    if isinstance(c, dict) and c.get("text"):
+        secs.append({"role": "catch", "text": str(c["text"]), "nodes": list(c.get("nodes") or []),
+                     "icons": list(c.get("icons") or ([c["icon"]] if c.get("icon") else []))})
+    elif isinstance(c, str) and c:
+        secs.append({"role": "catch", "text": c})
+    if plan.get("takeaway"):
+        secs.append({"role": "takeaway", "text": str(plan["takeaway"])})
+    norm = lambda x: re.sub(r"[^a-z0-9]+", " ", x.lower()).strip()
+    if len(secs) >= 4 and norm(" ".join(x["text"] for x in secs)) == norm(script):
+        return secs
+    sents = [x for x in _SENT.split(" ".join(str(script).split())) if x]
+    if len(sents) < 3:
+        return [{"role": "hook", "text": sents[0] if sents else script}] + \
+               ([{"role": "beat", "text": " ".join(sents[1:])}] if len(sents) > 1 else [])
+    hook, take, body = sents[0], sents[-1], sents[1:-1]
+    ci = next((i for i in range(len(body) - 1, -1, -1) if _CATCH.search(body[i])), None)
+    catch = body.pop(ci) if ci is not None and len(body) > 2 else None
+    beats_n = 3 if len(body) >= 6 else 2 if len(body) >= 2 else 1
+    groups = _groups(beats_n, len(body)) if body else []
+    out = [{"role": "hook", "text": hook}]
+    pbeats = [b for b in plan.get("beats") or [] if isinstance(b, dict)]
+    for k, grp in enumerate(groups):
+        nodes = list(pbeats[k].get("nodes") or []) if k < len(pbeats) else []
+        out.append({"role": "beat", "text": " ".join(body[i] for i in grp), "nodes": nodes})
+    if catch:
+        out.append({"role": "catch", "text": catch})
+    out.append({"role": "takeaway", "text": take})
+    return out
+
+
+def _find_number(words, value):
+    """Index of the spoken word carrying `value` (digits only compare: '1,000' == '1000'), else None."""
+    want = re.sub(r"[^\d.]", "", str(value)).rstrip(".")
+    if not want:
+        return None
+    for i, (w, _, _) in enumerate(words):
+        if re.sub(r"[^\d.]", "", str(w)).rstrip(".") == want:
+            return i
+    return None
+
+
+def plan_short(timeline, words, sections, number=None, photos=(), out_dir=None, size=SHORT_SIZE, n_stills=None):
+    """Shot plan for the Short: ({shot: block asset}, kinds). Motion blocks carry it; at most a few
+    full-frame stills (when photos exist); text blocks sit on a blurred topic still or the field."""
+    from src import blocks, shotlist
+    shots = timeline["shots"]
+    n = len(shots)
+    windows = ex.shot_windows(timeline)
+    cap_s = _max_block_span()
+    # word index -> section
+    bounds, k = [], 0
+    for sec in sections:
+        cnt = len(sec["text"].split())
+        bounds.append((k, k + cnt))
+        k += cnt
+    def sec_of_time(t):
+        for si, (a, b) in enumerate(bounds):
+            if a < len(words) and words[min(b, len(words)) - 1][2] >= t:
+                return si
+        return len(sections) - 1
+    shot_sec = [sec_of_time((s["start"] + s["end"]) / 2) for s in shots]
+    photos = [p for p in photos if p]
+    n_stills = len(photos) if n_stills is None else n_stills
+    still_budget = min(n_stills, max(1, int(round(n * 0.18)))) if n_stills else 0
+    beat_no = 0
+    plan = [None] * n          # (kind, spec, group_id)
+    for si, sec in enumerate(sections):
+        idx = [g for g in range(n) if shot_sec[g] == si]
+        if not idx:
+            continue
+        a, b = bounds[si]
+        said = [w for w, _, _ in words[a:b]]
+        phrase = key_phrase(said) or sb.clamp_bullet(sec["text"], 5)
+        nodes = [sb.clamp_bullet(x, 2) for x in sec.get("nodes") or [] if x][:3]
+        slide = {"title": sec.get("title") or phrase, "bullets": nodes}
+        role = sec["role"]
+        if role == "hook":
+            units = [("kinetic_text", {"text": phrase, "label": "Quick explainer"}, 1),
+                     (shotlist.STILL, {}, 1),
+                     ("icon_flow", dict(flow_spec(slide, said, phrase), title="In 60 seconds"), 2)]
+        elif role == "beat":
+            beat_no += 1
+            dia = {"kind": "diagram", "nodes": nodes if len(nodes) >= 2 else flow_spec(slide, said)["nodes"],
+                   "icons": sec.get("icons") or [], "title": f"Step {beat_no}"}
+            flow = dict(flow_spec(slide, said, phrase), title=f"Step {beat_no}", icons=sec.get("icons") or [])
+            kin = {"text": phrase, "label": f"Step {beat_no}"}
+            units = [("diagram", dia, 3), ("kinetic_text", kin, 1), (shotlist.STILL, {}, 1), ("icon_flow", flow, 2)] \
+                if beat_no % 2 else \
+                [("icon_flow", flow, 2), ("kinetic_text", kin, 1), ("diagram", dia, 3), (shotlist.STILL, {}, 1)]
+        elif role == "catch":
+            flow = dict(flow_spec(slide, said, phrase), title="The catch", icons=["warn"] * 3)
+            units = [("kinetic_text", {"text": phrase, "label": "The catch", "icon": "warn"}, 1),
+                     ("icon_flow", flow, 2), (shotlist.STILL, {}, 1)]
+        else:
+            units = [("kinetic_text", {"text": phrase, "label": "Takeaway", "icon": "check"}, 1),
+                     ("icon_flow", dict(flow_spec(slide, said, phrase), title="Remember"), 2)]
+        u, j = 0, 0
+        while j < len(idx):
+            kind, spec, span_n = units[u % len(units)]
+            u += 1
+            if kind == shotlist.STILL:
+                if still_budget <= 0:
+                    continue
+                still_budget -= 1
+                plan[idx[j]] = (kind, None, None)
+                j += 1
+                continue
+            grp = [idx[j]]
+            while len(grp) < span_n and j + len(grp) < len(idx) and \
+                    windows[idx[j + len(grp)]][1] - windows[grp[0]][0] <= cap_s:
+                grp.append(idx[j + len(grp)])
+            gid = f"short_{si}_{u}"
+            for g in grp:
+                plan[g] = (kind, dict(spec, kind=kind), gid)
+            j += len(grp)
+    # The count_up: a sourced number at the shot it is spoken (else the hook's first shot).
+    if number:
+        at = _find_number(words, number.get("value"))
+        g = 0
+        if at is not None:
+            t = (words[at][1] + words[at][2]) / 2
+            g = next((i for i, s in enumerate(shots) if s["start"] <= t < s["end"]), 0)
+        old = plan[g]
+        if old and old[2]:
+            for m in range(n):          # the unit it replaces shrinks to its other shots
+                if m != g and plan[m] and plan[m][2] == old[2]:
+                    plan[m] = (old[0], old[1], old[2] + ("b" if m < g else "c"))
+        plan[g] = ("count_up", dict(number, kind="count_up", title="By the numbers"), f"num_{g}")
+    fixed, kinds = {}, [shotlist.STILL] * n
+    photo_i = 0
+    g = 0
+    while g < n:
+        item = plan[g]
+        if not item or item[0] == shotlist.STILL:
+            g += 1
+            continue
+        kind, spec, gid = item
+        grp = [g]
+        while grp[-1] + 1 < n and plan[grp[-1] + 1] and plan[grp[-1] + 1][2] == gid:
+            grp.append(grp[-1] + 1)
+        if kind in ("kinetic_text", "count_up") and photos:
+            spec = dict(spec, backdrop_image=photos[photo_i % len(photos)])
+            photo_i += 1
+        span = windows[grp[-1]][1] - windows[grp[0]][0]
+        preview = Path(out_dir) / f"short_{g}_{kind}.png" if out_dir is not None else None
+        try:
+            asset = blocks.block_asset(spec, preview, size=size, span=span)
+        except Exception as exc:  # noqa: BLE001 - a bad block falls back to a still
+            _log(f"short: {kind} block at shot {g} failed ({exc}); using a still")
+            g = grp[-1] + 1
+            continue
+        for m in grp:
+            fixed[m] = dict(asset, block_id=f"short_{gid}", block_span=round(span, 4),
+                            block_offset=round(windows[m][0] - windows[grp[0]][0], 4))
+            kinds[m] = kind
+        g = grp[-1] + 1
+    slides = [{"title": sections[0]["text"] if sections else "", "bullets": []}]
+    _govern_runs(timeline, slides, fixed, kinds, out_dir, size, "short", words=[words])
+    _govern_text(timeline, slides, fixed, kinds, out_dir, size, "short", words=[words])
+    return fixed, kinds
+
+
+def short_number(number, words):
+    """The Short's count_up spec: the model's number only with a named source (never invented);
+    else a number actually spoken in the script (shown without a source line); else None."""
+    from src.shotlist import parse_number
+    if isinstance(number, dict) and str(number.get("source") or "").strip() and parse_number(number.get("value")):
+        label = sb.clamp_bullet(str(number.get("label") or ""), 5)
+        return {"value": str(number["value"]), "prefix": str(number.get("prefix") or ""),
+                "suffix": str(number.get("suffix") or ""), "label": label,
+                "source": sb.clamp_bullet(str(number["source"]), 8), "sourced": True}
+    spec = spoken_number([w for w, _, _ in words])
+    if spec:
+        spec.pop("fallback", None)
+        spec.pop("keywords", None)
+        spec["sourced"] = False
+        return spec
+    return None
+
+
 def produce_short(script, voice_path, out_dir, out_path, gather, used, spec, own_assets=(),
-                  fallback_assets=()):
+                  fallback_assets=(), plan=None):
+    """The DYPOL Short (1080x1920, 50-65 s): motion blocks (diagram, icon_flow, count_up, kinetic_text)
+    on living backgrounds, a few topic stills, word-level karaoke captions, SFX on block changes."""
+    from src import shotlist
     _judge_begin("short")
     spec = dict(spec or {})
     spec.setdefault("narration", script)
@@ -798,44 +1128,71 @@ def produce_short(script, voice_path, out_dir, out_path, gather, used, spec, own
     out_dir.mkdir(parents=True, exist_ok=True)
     narration = out_dir / "narration_short.wav"
     speech = ex.audio_duration(voice_path)
-    tail = max(0.5, SHORT_MIN + 0.3 - speech)
-    durations = ex.build_narration([voice_path], [tail], narration)
+    durations = ex.build_narration([voice_path], [0.6], narration)
     total = durations[0]
     words = sb.estimate_word_timings(script, speech, ex.detect_speech_regions(voice_path, speech))
     timeline = pacing.build_timeline([total], [words], [False])
     if sb.coverage_gaps(timeline):
         raise RuntimeError("Short timeline has uncovered frames")
     n_shots = len(timeline["shots"])
-    # New third-party visuals (each used once), topped up by this job's own FLUX stills re-framed vertically.
-    count = min(3, n_shots) if _flux_available() else min(n_shots, 6)
+    sections = short_sections(plan, script)
+    number = short_number((plan or {}).get("number") if isinstance(plan, dict) else None, words)
+    if number is None:
+        _log("short: no sourced or spoken number; no count_up (never invented)")
+    elif not number.get("sourced"):
+        _log(f"short: count_up uses the spoken number {number['value']} (the model gave no source)")
+    number = {k: v for k, v in (number or {}).items() if k != "sourced"} or None
+    # Topic stills (portrait): a few full-frame shots + blurred backdrops for the text blocks.
+    count = min(4, n_shots)
     fresh = gather(spec, out_dir, count, used, orientation="portrait", label="short", seed=97, min_count=0)
     pool = list(fresh)
     for asset in own_assets:
-        if len(pool) >= n_shots:
+        if len(pool) >= count:
             break
         if _is_real(asset):
             pool.append(dict(asset))
-    # Still short of unique visuals (e.g. FLUX quota hit): reuse the long video's stock stills.
     for asset in fallback_assets:
-        if len(pool) >= n_shots:
+        if len(pool) >= count:
             break
         if _is_real(asset) and Path(asset.get("path", "")).exists() and \
                 asset.get("sha256") not in {a.get("sha256") for a in pool}:
             pool.append(dict(asset, borrowed=True))
-    # Interleave so stock and AI stills alternate; reuse real assets before any gradient.
-    shot_assets_list = sb.assign_assets(n_shots, pool, seed=3, allow_stock_reuse=True)
-    shot_assets, manifest_usage = [], {}
+    photos = [a["path"] for a in pool if a.get("kind") == "image" and _is_real(a) and Path(a.get("path", "")).exists()]
+    fixed, kinds = plan_short(timeline, words, sections, number, photos=photos, out_dir=out_dir,
+                               n_stills=len(pool))
+    still_shots = [g for g in range(n_shots) if g not in fixed]
+    if still_shots and not pool:
+        # No topic visuals at all: those shots become icon_flows rather than placeholder art.
+        from src import blocks
+        windows = ex.shot_windows(timeline)
+        for g in still_shots:
+            fs = flow_spec({"title": sections[0]["text"] if sections else ""}, [w for w, _, _ in words])
+            fixed[g] = dict(blocks.block_asset(fs, None, size=SHORT_SIZE, span=windows[g][1] - windows[g][0]),
+                            block_id=f"short_fill_{g}", block_span=windows[g][1] - windows[g][0], block_offset=0.0)
+            kinds[g] = "icon_flow"
+        still_shots = []
+    shot_assets = [None] * n_shots
+    manifest = []
+    _manifest_blocks(fixed, timeline, "short", shot_assets, manifest)
+    plan_assets = sb.assign_assets(len(still_shots), pool, seed=3, allow_stock_reuse=True)
+    usage = {}
     from src.visuals import generated_graphic
-    for k, pick in enumerate(shot_assets_list):
+    for k, g in enumerate(still_shots):
+        pick = plan_assets[k] if k < len(plan_assets) else None
         if pick is None:
             pool.append(generated_graphic(out_dir / f"short_fill_{k}.png", SHORT_SIZE, seed=200 + k))
             pick = len(pool) - 1
-        shot_assets.append(pool[pick])
-        manifest_usage.setdefault(pick, []).append(k)
-    manifest = [manifest_entry(pool[p], "short", 1, shots, timeline) for p, shots in manifest_usage.items()]
+        shot_assets[g] = pool[pick]
+        usage.setdefault(pick, []).append(g)
+    manifest += [manifest_entry(pool[p], "short", 1, shots, timeline) for p, shots in usage.items()]
     apply_graphic_cap(shot_assets, manifest, "short")
+    style_check = style_report(kinds, fixed, timeline)
+    style_check["sections"] = [s["role"] for s in sections]
+    style_check["count_up"] = number
+    _log(f"short: style check {json.dumps(style_check)}")
 
-    audio, music = _mix_audio(narration, out_dir / "audio_short_final.wav")
+    sfx_path, sfx_summary = _sound_design(timeline, kinds, fixed, narration, out_dir, label="short")
+    audio, music = _mix_audio(narration, out_dir / "audio_short_final.wav", sfx_path=sfx_path)
     vf, burned = _finish(words, out_dir / "captions_short.ass", SHORT_SIZE, "short")
     overlay = ex.short_overlay(words, SHORT_SIZE, captions=not burned)
     _log(f"rendering Short: {total:.1f}s, {n_shots} shots")
@@ -848,9 +1205,14 @@ def produce_short(script, voice_path, out_dir, out_path, gather, used, spec, own
     judge_summary = _judge_finish("short", shot_assets, _short_line, manifest,
                                   spec.get("video_title", ""), out_dir)
     (out_dir / "captions.json").write_text(json.dumps(words, indent=1), encoding="utf-8")
+    (out_dir / "storyboard.json").write_text(json.dumps({"timeline": timeline, "shot_kinds": kinds,
+                                                         "style_check": style_check, "sfx": sfx_summary,
+                                                         "sections": sections}, indent=2), encoding="utf-8")
     captions_path = _write_captions(words, out_dir / "captions_short.srt")
     _cleanup(narration, audio, shot_assets)
+    if sfx_path:
+        Path(sfx_path).unlink(missing_ok=True)
     for leftover in out_dir.glob("short_voice*"):
         leftover.unlink(missing_ok=True)
     return {"manifest": manifest, "timeline": timeline, "words": words, "judge": judge_summary,
-            "captions_path": captions_path, "music": music}
+            "captions_path": captions_path, "music": music, "style_check": style_check, "sfx": sfx_summary}

@@ -224,6 +224,21 @@ def _cover(img, width, height):
     return resized.crop((left, top, left + width, top + height))
 
 
+BRIGHT_LUMA = 150.0     # a still brighter than this on average reads as a white background
+
+
+def tame_bright(img, limit=BRIGHT_LUMA, target=112.0):
+    """Darken a near-white still (white studio backdrops, blank pages) towards the DYPOL slate so a
+    frame never reads as a flat white background; normal stills pass through untouched."""
+    from PIL import ImageStat
+    mean = ImageStat.Stat(img.convert("L")).mean[0]
+    if mean <= limit:
+        return img
+    k = target / mean
+    dark = Image.eval(img, lambda v: int(v * k))
+    return Image.blend(dark, Image.new("RGB", img.size, (15, 20, 28)), 0.15)
+
+
 class StillSource:
     """Ken Burns: smooth sub-pixel zoom + pan over an oversized still."""
 
@@ -233,6 +248,7 @@ class StillSource:
         w, h = size
         with Image.open(path) as im:
             self.src = _cover(im.convert("RGB"), int(w * OVERSCAN), int(h * OVERSCAN))
+        self.src = tame_bright(self.src)
         rng = random.Random(seed)
         zoom_in = rng.random() < 0.6
         lo, hi = 1.0, OVERSCAN * 0.98

@@ -278,6 +278,62 @@ def generate_curriculum(previous_titles=None):
         raise
 
 
+LONG_MIN_WORDS = 1150            # ~8.5 min of gTTS narration (the last drafts ran ~130 wpm with pauses)
+LONG_CHAPTER_WORDS = (180, 240)
+SHORT_WORDS = (120, 145)           # 50-65 s of gTTS
+SHORT_MIN_WORDS = 110
+
+
+def narration_words(content):
+    slides = content.get("long_form_slides") or [] if isinstance(content, dict) else []
+    long_words = sum(len(str(s.get("content") or "").split()) for s in slides if isinstance(s, dict))
+    return long_words, len(str((content or {}).get("short_script") or "").split())
+
+
+def ensure_depth(client, content, prompt):
+    """One rewrite when the script is too thin for 8-12 min (or the Short for 50-65 s); keeps the longer one."""
+    if not isinstance(content, dict) or len(content.get("long_form_slides") or []) < 3:
+        return content
+    long_words, short_words = narration_words(content)
+    if long_words >= LONG_MIN_WORDS and short_words >= SHORT_MIN_WORDS:
+        print(f"📏 Script depth ok: long {long_words} words, Short {short_words} words")
+        return content
+    print(f"📏 Script too thin (long {long_words}/{LONG_MIN_WORDS} words, Short {short_words}/{SHORT_MIN_WORDS}); "
+          "asking for one deeper rewrite")
+    ask = f"""
+        Rewrite this lesson JSON. Keep the same keys, chapter titles and shot-list rules, but make it deeper:
+        - Every "content" must be {LONG_CHAPTER_WORDS[0]}-{LONG_CHAPTER_WORDS[1]} words; the long_form_slides narration
+          together must be at least {LONG_MIN_WORDS + 100} words (it is {long_words} now). Add concrete examples, a
+          step-by-step worked walkthrough of one example, and the catch (limits, failure modes, how people guard
+          against them). No filler, no repetition.
+        - "short_script" must be {SHORT_WORDS[0]}-{SHORT_WORDS[1]} words (it is {short_words} now) and equal the
+          "short" texts joined in order; no call to action.
+        - Add shots for the new narration (same rules). Return only valid JSON.
+
+        ORIGINAL INSTRUCTIONS (for reference):
+        {prompt[:6000]}
+
+        CURRENT JSON:
+        {json.dumps(content)[:24000]}
+        """
+    try:
+        response = _generate_text_with_fallback(client, ask, task_name="lesson depth rewrite")
+        better = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
+        new_long, new_short = narration_words(better)
+        if new_long > long_words and len(better.get("long_form_slides") or []) >= 3:
+            if new_short < short_words:
+                for key in ("short_script", "short", "short_hook"):
+                    if key in content:
+                        better[key] = content[key]
+            print(f"📏 Rewrite: long {long_words} -> {new_long} words, Short {short_words} -> "
+                  f"{narration_words(better)[1]} words")
+            return better
+        print(f"📏 Rewrite was not longer ({new_long} words); keeping the first script")
+    except Exception as exc:  # noqa: BLE001 - the first script still makes a video
+        print(f"⚠️ depth rewrite failed ({exc}); keeping the first script")
+    return content
+
+
 def generate_lesson_content(lesson_title, reviewer_feedback=None):
     """Generates the content for one long-form lesson and its promotional short."""
     print(f"🤖 Generating content for lesson: '{lesson_title}'...")
@@ -290,9 +346,13 @@ def generate_lesson_content(lesson_title, reviewer_feedback=None):
         Use analogies and clear, simple language. Each concept must be explained from a developer's perspective, assuming no prior AI or ML knowledge.
 
         Generate a JSON response with these keys:
-        1. "long_form_slides": A list of 6 to 7 chapter objects for a longer, more detailed main video. Each object needs:
+        1. "long_form_slides": A list of 7 chapter objects for an 8-12 minute main video. Each object needs:
            - "title": a short chapter headline (2-5 words).
-           - "content": the full narration for this chapter (spoken only, never shown on screen).
+           - "content": the full narration for this chapter (spoken only, never shown on screen), {{chapter_words}}
+             words. Go deep, not wide: every chapter gives at least one concrete example with real-looking inputs
+             and outputs. One chapter is a worked walkthrough that follows ONE example step by step from start to
+             finish ("first... then... finally..."). One chapter is "the catch": where it fails, its limits, and
+             how practitioners guard against it. The whole long_form_slides narration is at least {{min_words}} words.
            - "bullets": a list of at most 3 on-screen bullet points, each at most 8 words, in the order the narration covers them.
            - "visual_queries": 2-3 short stock-footage search phrases (1-3 words each) naming concrete, photographable things
              for this slide (e.g. "server room", "padlock circuit board"). No brand, company, product or person names.
@@ -301,20 +361,33 @@ def generate_lesson_content(lesson_title, reviewer_feedback=None):
            - "shots": the chapter's shot list (see SHOT LIST RULES below).
         2. "short_form_highlight": A single, punchy, 1-2 sentence summary for a YouTube Short.
         3. "short_hook": A scroll-stopping opening line for the Short, at most 8 words (a question or surprising fact).
-        4. "short_script": The Short's full narration, 55-85 words, starting with the exact short_hook, plain spoken
-           sentences, no hashtags, no emojis.
+        4. "short_script": The Short's full narration, {{short_min}}-{{short_max}} words (50-65 seconds), starting with
+           the exact short_hook, plain spoken sentences, no hashtags, no emojis, and NO call to action (no
+           "subscribe", "follow", "full video", "link"). It is exactly the texts of "short" below joined in order.
+        4b. "short": the Short's structure, {{"hook": "...", "beats": [2-3 x {{"text": "2-3 sentences, one how-it-works
+           step", "nodes": ["2-3 labels of 1-2 words for an on-screen flow diagram"], "icon": one of {{icon_names}}}}],
+           "catch": {{"text": "1-2 sentences: the limit or failure mode", "nodes": [...]}},
+           "takeaway": "one sentence to remember", "number": {{"value": "...", "prefix": "", "suffix": "%",
+           "label": "2-5 words naming what is counted, readable on its own", "source": "publisher + year"}} or null}}.
+           "number" must be a real published figure you can name the source for, said in one of the texts above
+           (digits, e.g. "55 percent"). If you cannot name a real source, set "number" to null; never make one up.
         5. "short_visual_queries": 3 short stock-footage search phrases for the Short (same rules as visual_queries).
         6. "hashtags": A string of 5-7 relevant, space-separated hashtags for this lesson (e.g., "#GenerativeAI #LLM #Developer","#NeuralNetworks #BeginnerAI #AIforDevelopers").
         7. "hook", "hook_number", "takeaway", "ask": the long video's cold open and ending (see HOOK AND ENDING RULES).
 
         Return only valid JSON.
         """
+        from src.icons import NAMES as _ICON_NAMES
+        prompt = prompt.replace("{chapter_words}", f"{LONG_CHAPTER_WORDS[0]}-{LONG_CHAPTER_WORDS[1]}") \
+            .replace("{min_words}", str(LONG_MIN_WORDS)).replace("{short_min}", str(SHORT_WORDS[0])) \
+            .replace("{short_max}", str(SHORT_WORDS[1])).replace("{icon_names}", ", ".join(_ICON_NAMES))
         from src.shotlist import prompt_rules
         prompt += prompt_rules()
         prompt += reviewer_feedback_block(reviewer_feedback_text(reviewer_feedback))
         response = _generate_text_with_fallback(client, prompt, task_name='lesson content generation')
         json_string = response.text.strip().replace("```json", "").replace("```", "")
         content = json.loads(json_string)
+        content = ensure_depth(client, content, prompt)
         print("✅ Lesson content generated successfully.")
         return content
     except Exception as e:
