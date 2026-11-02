@@ -16,3 +16,7 @@ Pillow==9.5.0
 
 # ✅ For MP3 to WAV conversion
 pydub
+
+# Engine A style guide (style/style.guide.yaml) and code_panel syntax colours
+PyYAML
+Pygments

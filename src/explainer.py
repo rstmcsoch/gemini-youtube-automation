@@ -381,7 +381,24 @@ def render_caption(words, active, size):
 
 # ------------------------------------------------------------------ renderer
 
+class _OffsetSource:
+    """A rendered block spanning several timeline shots: every shot reads the same block clock."""
+
+    def __init__(self, inner, offset):
+        self.inner, self.offset = inner, offset
+
+    def frame(self, local_t):
+        return self.inner.frame(local_t + self.offset)
+
+    def close(self):
+        self.inner.close()
+
+
 def _make_source(asset, size, span, seed):
+    if asset.get("kind") == "block":
+        from src import blocks
+        inner = blocks.make_source(asset, size, asset.get("block_span") or span)
+        return _OffsetSource(inner, float(asset.get("block_offset") or 0.0))
     if asset.get("kind") == "video":
         return VideoSource(asset["path"], size, span)
     return StillSource(asset["path"], size, span, seed=seed)
@@ -563,9 +580,21 @@ def render(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps=FP
     return _render_serial(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress)
 
 
-def long_overlay(timeline, slides, bullet_times, size):
-    """Lower-third panel per slide; bullets fade/slide in at their narration times."""
+def long_overlay(timeline, slides, bullet_times, size, hide_windows=()):
+    """Lower-third panel per slide; bullets fade/slide in at their narration times.
+
+    `hide_windows` are (start, end) spans drawn by block renderers: they carry their own
+    text, so the lower third fades out over them.
+    """
     bug, bug_xy = render_bug(size)
+    hide_windows = sorted(hide_windows or ())
+
+    def hidden(t):
+        h = 0.0
+        for a, b in hide_windows:
+            if a - 0.3 <= t <= b + 0.3:
+                h = max(h, min(_ease((t - (a - 0.3)) / 0.3), _ease(((b + 0.3) - t) / 0.3)))
+        return h
     prepared = [render_lower_third(s, size) for s in slides]
     shift = int(36 * size[1] / 1080)
 
@@ -577,6 +606,8 @@ def long_overlay(timeline, slides, bullet_times, size):
                 continue
             local, dur = t - sl["start"], sl["end"] - sl["start"]
             fade = _ease((local - 0.15) / 0.35) * _ease((dur - 0.08 - local) / 0.3)
+            if hide_windows:
+                fade *= 1.0 - hidden(t)
             if fade <= 0.01:
                 break
             panel, origin, bullets = prepared[k]

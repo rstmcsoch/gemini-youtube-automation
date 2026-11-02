@@ -290,23 +290,27 @@ def generate_lesson_content(lesson_title, reviewer_feedback=None):
         Use analogies and clear, simple language. Each concept must be explained from a developer's perspective, assuming no prior AI or ML knowledge.
 
         Generate a JSON response with these keys:
-        1. "long_form_slides": A list of 7 to 8 slide objects for a longer, more detailed main video. Each object needs:
-           - "title": a short headline (max 8 words).
-           - "content": the full narration paragraph for this slide (spoken only, never shown on screen).
+        1. "long_form_slides": A list of 6 to 7 chapter objects for a longer, more detailed main video. Each object needs:
+           - "title": a short chapter headline (2-5 words).
+           - "content": the full narration for this chapter (spoken only, never shown on screen).
            - "bullets": a list of at most 3 on-screen bullet points, each at most 8 words, in the order the narration covers them.
            - "visual_queries": 2-3 short stock-footage search phrases (1-3 words each) naming concrete, photographable things
              for this slide (e.g. "server room", "padlock circuit board"). No brand, company, product or person names.
            - "image_prompt": one sentence describing a concrete scene to illustrate the slide. No brand names, no logos,
              no text, letters or numbers, and no screens or documents showing writing.
+           - "shots": the chapter's shot list (see SHOT LIST RULES below).
         2. "short_form_highlight": A single, punchy, 1-2 sentence summary for a YouTube Short.
         3. "short_hook": A scroll-stopping opening line for the Short, at most 8 words (a question or surprising fact).
         4. "short_script": The Short's full narration, 55-85 words, starting with the exact short_hook, plain spoken
            sentences, no hashtags, no emojis.
         5. "short_visual_queries": 3 short stock-footage search phrases for the Short (same rules as visual_queries).
         6. "hashtags": A string of 5-7 relevant, space-separated hashtags for this lesson (e.g., "#GenerativeAI #LLM #Developer","#NeuralNetworks #BeginnerAI #AIforDevelopers").
+        7. "hook", "hook_number", "takeaway", "ask": the long video's cold open and ending (see HOOK AND ENDING RULES).
 
         Return only valid JSON.
         """
+        from src.shotlist import prompt_rules
+        prompt += prompt_rules()
         prompt += reviewer_feedback_block(reviewer_feedback_text(reviewer_feedback))
         response = _generate_text_with_fallback(client, prompt, task_name='lesson content generation')
         json_string = response.text.strip().replace("```json", "").replace("```", "")

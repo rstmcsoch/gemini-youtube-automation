@@ -1,0 +1,77 @@
+# DYPOL style guide — Engine A (long 16:9 video). Loaded only through src/style.py.
+# Source: references/style-guide-proposal.md sections (b), (c) and "DYPOL's own look" (draft v0.1, 1 Nov 2026).
+version: 1
+
+long:
+  narration:
+    wpm_target: 158
+    wpm_min: 150
+    wpm_max: 165
+  hook:
+    no_intro: true                 # no "hello and welcome", no logo/title card first
+    first_word_by_s: 0.5
+    stakes_by_s: 3.0
+    number_by_s: 8.0
+    max_first_sentence_words: 14
+    first_block_kinds: [count_up, kinetic_text, code_panel, diagram]   # a proof block, never a still
+  chapters:
+    min_interval_s: 60
+    max_interval_s: 120
+    card_kind: chapter_card
+  pacing:
+    screen_change_min_s: 2.0
+    screen_change_max_s: 4.0
+    max_static_s: 6.0
+  variety:
+    max_same_kind_run: 2           # never 3 blocks of the same kind in a row
+    min_demo_share: 0.40           # share of shots that are demo-style blocks
+    max_still_share: 0.15
+    demo_kinds: [code_panel, diagram, count_up]
+  ending:
+    takeaway: true
+    asks: 1                        # exactly one ask: a specific comment question
+  text:
+    max_on_screen_words: 25
+    min_number_px: 120
+    safe_margin: 0.06
+
+blocks:
+  kinds: [kinetic_text, count_up, code_panel, diagram, chapter_card, stock_or_ai_still]
+  rendered: [kinetic_text, count_up, code_panel, diagram, chapter_card]   # CPU renderers
+  default_fallback: stock_or_ai_still
+  diagram:
+    min_nodes: 2
+    max_nodes: 5
+  code_panel:
+    chars_per_s: 32
+    max_lines: 10
+
+look:
+  size: [1920, 1080]
+  fps: 30
+  palette:
+    background: "#0F141C"         # deep slate
+    panel: "#161D28"
+    border: "#26303D"
+    body: "#EEF2F6"               # off-white
+    muted: "#8A97A8"
+    lime: "#C8F560"               # the point / new / winner
+    cyan: "#4CC9F0"               # the product / system
+    amber: "#FFB547"              # caveat / the catch
+  grid:
+    spacing_px: 64
+    opacity: 0.04                  # diagram blocks only
+  panel_radius_px: 14
+  label_bar_px: 6
+  fonts:
+    # Both SIL Open Font License 1.1; licences vendored next to the files.
+    headline:
+      family: Space Grotesk
+      file: assets/fonts/dypol/SpaceGrotesk-VF.ttf
+      license: assets/fonts/dypol/OFL-SpaceGrotesk.txt
+    mono:
+      family: JetBrains Mono
+      file: assets/fonts/dypol/JetBrainsMono-VF.ttf
+      license: assets/fonts/dypol/OFL-JetBrainsMono.txt
+  motion:
+    easing: ease_in_out_cubic

@@ -80,12 +80,31 @@ def generate_lesson_assets(lesson):
         "visual_queries": body_slides[-1]["visual_queries"] if body_slides else ["technology"],
         "image_prompt": body_slides[-1]["image_prompt"] if body_slides else "abstract technology",
     }
+    # Style guide (Engine A): cold-open hook with a number instead of an intro; takeaway + one ask to close.
+    from src import shotlist
+    hook_line = str(lesson_content.get("hook") or "").strip()
+    takeaway = str(lesson_content.get("takeaway") or "").strip()
+    ask = str(lesson_content.get("ask") or "").strip()
+    if hook_line:
+        for issue in shotlist.hook_issues(hook_line):
+            print(f"⚠️ hook check: {issue}")
+        number = lesson_content.get("hook_number") if isinstance(lesson_content.get("hook_number"), dict) else {}
+        intro_slide["shots"] = shotlist.enforce(
+            [dict(number, kind="count_up", fallback="kinetic_text", text=lesson['title']),
+             {"kind": "kinetic_text", "text": lesson['title']}], chapter=False)
+    if takeaway and ask:
+        outro_slide["title"] = "The takeaway"
+        outro_slide["bullets"] = []
+        outro_slide["shots"] = shotlist.enforce(
+            [{"kind": "kinetic_text", "text": lesson_content.get("takeaway_short") or takeaway, "label": "Takeaway"},
+             {"kind": "kinetic_text", "text": ask, "label": "Your turn"}], chapter=False)
     all_slides = [intro_slide] + body_slides + [outro_slide]
 
     slide_scripts = [
-        f"Hello and welcome to {__import__('os').environ.get('CHANNEL_BRAND', 'Signal by DYPOL')}. Today’s lesson is titled {lesson['title']}.",
+        hook_line or f"Hello and welcome to {__import__('os').environ.get('CHANNEL_BRAND', 'Signal by DYPOL')}. Today’s lesson is titled {lesson['title']}.",
         *[s['content'] for s in body_slides],
-        "Thanks for watching! If you found this helpful, make sure to subscribe to our channel and hit the like button."
+        (f"{takeaway} {ask} Links are in the description." if takeaway and ask else
+         "Thanks for watching! If you found this helpful, make sure to subscribe to our channel and hit the like button.")
     ]
     for slide, script in zip(all_slides, slide_scripts):
         slide["content"] = script

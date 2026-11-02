@@ -177,7 +177,7 @@ def _flux_available():
         return False
 
 
-def _assign(timeline, per_slide_assets, size, out_dir, label):
+def _assign(timeline, per_slide_assets, size, out_dir, label, fixed=None):
     """Resolve every timeline shot to an asset; returns (shot_assets, manifest).
 
     Fill order for shots beyond a slide's unique assets: own/AI assets, then the
@@ -185,8 +185,10 @@ def _assign(timeline, per_slide_assets, size, out_dir, label):
     from other slides when a slide has none, and only then a gradient graphic.
     """
     from src.visuals import generated_graphic
+    fixed = fixed or {}
     shot_assets = [None] * len(timeline["shots"])
     manifest = []
+    _manifest_blocks(fixed, timeline, label, shot_assets, manifest)
     donors = [(i, a) for i, assets in enumerate(per_slide_assets) for a in assets if _is_real(a)]
     for sl in timeline["slides"]:
         assets = per_slide_assets[sl["index"]]
@@ -195,9 +197,10 @@ def _assign(timeline, per_slide_assets, size, out_dir, label):
             ranked = sorted(donors, key=lambda d: (-abs(d[0] - sl["index"]), d[1].get("kind") == "video"))
             for _, donor in ranked[:2]:
                 assets.append(dict(donor, borrowed=True))
-        plan = sb.assign_assets(len(sl["shots"]), assets, seed=sl["index"], allow_stock_reuse=True)
+        free = [g for g in sl["shots"] if g not in fixed]   # block shots are already drawn by a renderer
+        plan = sb.assign_assets(len(free), assets, seed=sl["index"], allow_stock_reuse=True)
         usage = {}
-        for local, global_index in enumerate(sl["shots"]):
+        for local, global_index in enumerate(free):
             pick = plan[local] if local < len(plan) else None
             if pick is None:
                 asset = generated_graphic(Path(out_dir) / f"{label}_{sl['index']}_{local}_fill.png", size,
@@ -210,6 +213,134 @@ def _assign(timeline, per_slide_assets, size, out_dir, label):
             manifest.append(manifest_entry(assets[pick], label, sl["index"] + 1, shots, timeline))
     apply_graphic_cap(shot_assets, manifest, label)
     return shot_assets, manifest
+
+
+RUN_CAP = {"chapter_card": 1, "count_up": 1, "kinetic_text": 1, "code_panel": 3, "diagram": 3}
+
+
+def _groups(n_items, n_slots):
+    """Split n_slots consecutive timeline shots into n_items near-equal contiguous groups."""
+    edges = [round(k * n_slots / n_items) for k in range(n_items + 1)]
+    return [list(range(edges[k], edges[k + 1])) for k in range(n_items)]
+
+
+def plan_blocks(timeline, slides, out_dir=None, size=LONG_SIZE, label="long"):
+    """Map each slide's shot list onto timeline shots.
+
+    Returns ({global_shot_index: block asset}, [kind per timeline shot]). A rendered block
+    may span up to RUN_CAP consecutive timeline shots (one continuous animation: each
+    shot carries the block's time offset, so the crossfade between them is invisible);
+    leftover shots and stock_or_ai_still shots stay with the existing still sources.
+    """
+    from src import blocks, shotlist
+    windows = ex.shot_windows(timeline)
+    fixed, kinds = {}, [shotlist.STILL] * len(timeline["shots"])
+    chapters = [i for i, s in enumerate(slides) if (s.get("shots") or [{}])[0].get("kind") == shotlist.CHAPTER]
+    for sl, slide in zip(timeline["slides"], slides):
+        shots = list(slide.get("shots") or [])
+        tl = sl["shots"]
+        if not shots or not tl:
+            continue
+        if len(shots) >= len(tl):
+            groups = [(shots[int(j * len(shots) / len(tl))], [j]) for j in range(len(tl))]
+        else:
+            groups = list(zip(shots, _groups(len(shots), len(tl))))
+        for g_index, (shot, locals_) in enumerate(groups):
+            kind = shot.get("kind")
+            if kind not in blocks.SOURCES or not locals_:
+                continue
+            spec = dict(shot)
+            if kind == shotlist.CHAPTER:
+                spec["number"] = chapters.index(sl["index"]) + 1 if sl["index"] in chapters else 1
+                spec["total"] = max(1, len(chapters))
+            span_idx = [tl[j] for j in locals_[:RUN_CAP.get(kind, 1)]]
+            start = windows[span_idx[0]][0]
+            span = windows[span_idx[-1]][1] - start
+            preview = None
+            if out_dir is not None:
+                preview = Path(out_dir) / f"{label}_{sl['index']}_{g_index}_{kind}.png"
+            try:
+                base = blocks.block_asset(spec, preview, size=size, span=span)
+            except Exception as exc:  # noqa: BLE001 - a bad block falls back to the still path
+                _log(f"{label}: {kind} block for slide {sl['index'] + 1} failed ({exc}); using a still")
+                continue
+            base["block_id"] = f"{label}_{sl['index']}_{g_index}"
+            base["block_span"] = span
+            for g in span_idx:
+                fixed[g] = dict(base, block_offset=round(windows[g][0] - start, 4))
+                kinds[g] = kind
+    _govern_runs(timeline, slides, fixed, kinds, out_dir, size, label)
+    return fixed, kinds
+
+
+def _units(kinds, fixed):
+    """Collapse consecutive shots of one block into a unit: [(kind, [shot indices])]."""
+    units = []
+    for i, kind in enumerate(kinds):
+        bid = fixed.get(i, {}).get("block_id")
+        if units and bid and units[-1][2] == bid:
+            units[-1][1].append(i)
+        else:
+            units.append((kind, [i], bid))
+    return [(k, idx) for k, idx, _ in units]
+
+
+def _govern_runs(timeline, slides, fixed, kinds, out_dir, size, label):
+    """Never 3 units of the same kind in a row: the 3rd still becomes a kinetic_text callout
+    from the slide's bullets; a 3rd rendered block of the same kind falls back to a still."""
+    from src import blocks, shotlist
+    limit = shotlist.max_run()
+    windows = ex.shot_windows(timeline)
+    for _ in range(3):
+        units = _units(kinds, fixed)
+        violations = shotlist.runs_over([k for k, _ in units], limit)
+        if not violations:
+            return
+        for start, kind, length in violations:
+            for u in range(start + limit, start + length, limit + 1):
+                idx = units[u][1]
+                if kind == shotlist.STILL:
+                    g = idx[0]
+                    slide = slides[timeline["shots"][g]["slide"]]
+                    bullets = [b for b in slide.get("bullets") or [] if b]
+                    text = bullets[(g // 2) % len(bullets)] if bullets else ""
+                    if not text:
+                        continue
+                    spec = {"kind": "kinetic_text", "text": text, "keywords": [], "fallback": shotlist.STILL}
+                    span = windows[g][1] - windows[g][0]
+                    preview = Path(out_dir) / f"{label}_gov_{g}.png" if out_dir is not None else None
+                    fixed[g] = dict(blocks.block_asset(spec, preview, size=size, span=span),
+                                    block_id=f"{label}_gov_{g}", block_span=span, block_offset=0.0)
+                    kinds[g] = "kinetic_text"
+                else:
+                    for g in idx:
+                        fixed.pop(g, None)
+                        kinds[g] = shotlist.STILL
+
+
+def _manifest_blocks(fixed, timeline, label, shot_assets, manifest):
+    by_id = {}
+    for g, asset in sorted(fixed.items()):
+        shot_assets[g] = asset
+        by_id.setdefault(asset["block_id"], []).append(g)
+    for bid, shots in by_id.items():
+        asset = fixed[shots[0]]
+        entry = manifest_entry(asset, label, timeline["shots"][shots[0]]["slide"] + 1, shots, timeline)
+        entry["kind"] = f"block:{asset['block']}"
+        manifest.append(entry)
+
+
+def style_report(kinds, fixed):
+    """Shares and run checks on the final shot plan (logged + saved in storyboard.json)."""
+    from src import shotlist, style
+    units = [k for k, _ in _units(kinds, fixed)]
+    report = shotlist.shot_kinds_share(kinds)
+    report["kinds"] = {k: kinds.count(k) for k in sorted(set(kinds))}
+    report["runs_over_limit"] = shotlist.runs_over(units, shotlist.max_run())
+    variety = style.long_rules()["variety"]
+    report["demo_share_ok"] = report["demo_share"] >= variety["min_demo_share"]
+    report["still_share_ok"] = report["still_share"] <= variety["max_still_share"]
+    return report
 
 
 def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesson_terms=(), video_title=None):
@@ -225,9 +356,10 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
     if gaps:
         raise RuntimeError(f"Timeline has uncovered frames (would render black): {gaps[:5]}")
 
+    fixed, kinds = plan_blocks(timeline, slides, out_dir, LONG_SIZE, "long")
     per_slide_assets, bullet_times, caption_segments = [], [], []
     for sl, slide, path in zip(timeline["slides"], slides, narration_paths):
-        n_shots = len(sl["shots"])
+        n_shots = len([g for g in sl["shots"] if g not in fixed]) or 1
         terms = sb.topic_terms(slide.get("visual_queries", []), slide.get("bullets", []), *lesson_terms)
         spec = {"visual_queries": slide.get("visual_queries"), "image_prompt": slide.get("image_prompt"),
                 "terms": terms, "video_title": video_title,
@@ -241,10 +373,14 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
         words = sb.estimate_word_timings(slide.get("content", ""), speech, ex.detect_speech_regions(path, speech))
         bullet_times.append(sb.bullet_reveal_times(slide.get("bullets", []), words, sl["end"] - sl["start"]))
         caption_segments.append((sl["start"], words))
-    shot_assets, manifest = _assign(timeline, per_slide_assets, LONG_SIZE, out_dir, "long")
+    shot_assets, manifest = _assign(timeline, per_slide_assets, LONG_SIZE, out_dir, "long", fixed=fixed)
+    style_check = style_report(kinds, fixed)
+    _log(f"long: style check {json.dumps(style_check)}")
 
     audio, music = _mix_audio(narration, out_dir / "audio_long_final.wav")
-    overlay = ex.long_overlay(timeline, slides, bullet_times, LONG_SIZE)
+    overlay = ex.long_overlay(timeline, slides, bullet_times, LONG_SIZE,
+                              hide_windows=[(timeline["shots"][g]["start"], timeline["shots"][g]["end"])
+                                            for g in sorted(fixed)])
     _log(f"rendering long video: {timeline['total']:.1f}s, {len(timeline['shots'])} shots")
     ex.render(timeline, shot_assets, audio, out_path, LONG_SIZE, overlay, progress=_log)
     judge_summary = _judge_finish(
@@ -252,8 +388,9 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
         lambda k: (slides[timeline["shots"][k]["slide"]].get("content")
                    or slides[timeline["shots"][k]["slide"]].get("title", "")),
         manifest, video_title, out_dir)
-    storyboard = {"timeline": timeline, "bullet_times": bullet_times,
-                  "slides": [{k: s.get(k) for k in ("title", "bullets", "visual_queries")} for s in slides]}
+    storyboard = {"timeline": timeline, "bullet_times": bullet_times, "shot_kinds": kinds,
+                  "style_check": style_check,
+                  "slides": [{k: s.get(k) for k in ("title", "bullets", "visual_queries", "shots")} for s in slides]}
     (out_dir / "storyboard.json").write_text(json.dumps(storyboard, indent=2), encoding="utf-8")
     captions_path = _write_captions(caps.segments_to_words(caption_segments), out_dir / "captions_long.srt")
     _cleanup(narration, audio, shot_assets)

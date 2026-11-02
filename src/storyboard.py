@@ -300,7 +300,14 @@ def normalize_slide(slide, lesson_title=""):
         "visual_queries": queries,
         "image_prompt": str(scene),
         "kicker": slide.get("kicker", ""),
+        # Engine A shot list: closed block-kind enum, repaired so shotlist.validate() passes.
+        "shots": _shots(slide.get("shots"), title),
     }
+
+
+def _shots(raw, title):
+    from src import shotlist
+    return shotlist.enforce(raw, chapter_title=title, chapter=True)
 
 
 # ---------------------------------------------------------------- timing
