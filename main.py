@@ -165,6 +165,18 @@ def generate_lesson_assets(lesson):
         thumbnail_title=f"Quick Tip: {lesson['title']}"
     )
 
+    # QC (warnings only): loudness, silences, black / frozen stretches + a contact sheet,
+    # written as qc.json and contact.png into output/ (the draft artifact).
+    qc_summary = {"warnings": [], "qc_json": None, "contact": None}
+    try:
+        from src import qc
+        qc_report = qc.run(long_video_path, short_video_path, OUTPUT_DIR,
+                           extra={"style_check": long_result.get("style_check"), "sfx": long_result.get("sfx")})
+        qc_summary = {"warnings": qc_report.get("warnings", []), "qc_json": "qc.json",
+                      "contact": qc_report.get("contact")}
+    except Exception as exc:  # noqa: BLE001 - QC never blocks a draft
+        print(f"⚠️ QC skipped: {exc}")
+
     hashtags = lesson_content.get("hashtags", "#AI #Developer #LearnAI")
     long_desc = (
         f"Part of the {__import__('os').environ.get('CHANNEL_BRAND', 'Signal by DYPOL')} series.\n\n"
@@ -233,6 +245,8 @@ def generate_lesson_assets(lesson):
                 "tags": "AI,Shorts,TechTip",
             },
         ],
+        # Post-render QC warnings (never sets review_required); full report in output/qc.json.
+        "qc": qc_summary,
         # Background music bed (Open Lo-Fi CC0) per video; {"provider": "none"} = rendered without music.
         "music": {"long": long_result.get("music") or {"provider": "none"},
                   "short": short_result.get("music") or {"provider": "none"}},

@@ -147,20 +147,48 @@ def build_narration(segment_paths, pads, out_wav, min_total=None):
     return durations
 
 
-def mix_music_and_normalize(narration_wav, out_wav, music_path=None, music_db=-26, target_lufs=-14.0):
-    """Mix quiet music (music_db, default -26 dB, 1.5 s fade in / 2 s fade out) under
-    narration and loudnorm to -14 LUFS (two-pass, true peak -1.5 dBTP). music_path=None
-    renders narration only."""
+DUCK = "sidechaincompress=threshold=0.04:ratio=5:attack=40:release=450:makeup=1"
+
+
+def mix_graph(total, music=False, sfx=False, music_db=-26, duck=True):
+    """filter_complex for narration [0] + optional music bed [1] + optional SFX track [last].
+
+    The music sits at music_db and is additionally ducked under the voice (sidechain); the
+    SFX track is pre-levelled ~12 dB under the voice by src/sfx.py."""
+    fmt = "aformat=sample_rates=48000:channel_layouts=stereo"
+    parts, labels = [], ["[v]"]
+    key = music and duck
+    parts.append(f"[0:a]{fmt}" + (",asplit=2[v][key]" if key else "[v]"))
+    if music:
+        parts.append(f"[1:a]volume={music_db}dB,{fmt},afade=t=in:d=1.5,"
+                     f"afade=t=out:st={max(0.0, total - 2.0):.3f}:d=2" + ("[m0]" if key else "[m]"))
+        if key:
+            parts.append(f"[m0][key]{DUCK}[m]")
+        labels.append("[m]")
+    if sfx:
+        parts.append(f"[{2 if music else 1}:a]{fmt}[s]")
+        labels.append("[s]")
+    parts.append(f"{''.join(labels)}amix=inputs={len(labels)}:duration=first:normalize=0[a]")
+    return ";".join(parts)
+
+
+def mix_music_and_normalize(narration_wav, out_wav, music_path=None, music_db=-26, target_lufs=-14.0,
+                            sfx_path=None):
+    """Mix quiet music (music_db, default -26 dB, 1.5 s fade in / 2 s fade out, ducked under the
+    voice) and an optional SFX track under narration, then loudnorm to -14 LUFS (two-pass, true
+    peak -1.5 dBTP). music_path=None renders narration (+ SFX) only."""
     total = audio_duration(narration_wav)
     mixed = Path(str(out_wav) + ".mix.wav")
-    if music_path and Path(music_path).exists():
-        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(narration_wav),
-               "-stream_loop", "-1", "-i", str(music_path), "-filter_complex",
-               f"[1:a]volume={music_db}dB,aformat=sample_rates=48000:channel_layouts=stereo,"
-               f"afade=t=in:d=1.5,afade=t=out:st={max(0.0, total - 2.0):.3f}:d=2[m];"
-               f"[0:a]aformat=sample_rates=48000:channel_layouts=stereo[v];"
-               f"[v][m]amix=inputs=2:duration=first:normalize=0[a]",
-               "-map", "[a]", "-t", f"{total:.3f}", str(mixed)]
+    music = bool(music_path and Path(music_path).exists())
+    sfx = bool(sfx_path and Path(sfx_path).exists())
+    if music or sfx:
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(narration_wav)]
+        if music:
+            cmd += ["-stream_loop", "-1", "-i", str(music_path)]
+        if sfx:
+            cmd += ["-i", str(sfx_path)]
+        cmd += ["-filter_complex", mix_graph(total, music, sfx, music_db), "-map", "[a]", "-t", f"{total:.3f}",
+                str(mixed)]
     else:
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(narration_wav), str(mixed)]
     subprocess.run(cmd, check=True)
@@ -265,7 +293,7 @@ class VideoSource:
 
 # ------------------------------------------------------------------ overlays
 
-def render_lower_third(slide, size):
+def render_lower_third(slide, size, bottom=0.06):
     """Return (panel RGBA, origin, [(bullet RGBA, origin), ...]) for a long-form slide."""
     w, h = size
     scale = h / 1080
@@ -292,7 +320,7 @@ def render_lower_third(slide, size):
                  [probe.textlength(kicker, font=kick_font) if kicker else 0])
     panel_w = min(panel_w, max(int(w * 0.26), int(widest) + 2 * pad + int(14 * scale) + 4))
     x0 = int(w * 0.04)
-    y0 = h - int(h * 0.06) - height
+    y0 = h - int(h * bottom) - height
     panel = Image.new("RGBA", (panel_w, height), (0, 0, 0, 0))
     d = ImageDraw.Draw(panel)
     d.rounded_rectangle((0, 0, panel_w - 1, height - 1), radius=int(20 * scale), fill=(8, 14, 30, 200))
@@ -324,7 +352,7 @@ def render_lower_third(slide, size):
     return panel, (x0, y0), bullets
 
 
-def render_bug(size, text=None):
+def render_bug(size, text=None, right=False):
     text = text or __import__("os").environ.get("CHANNEL_BRAND", "Signal by DYPOL")
     w, h = size
     fnt = font(int(min(w, h) * 0.024), bold=True)
@@ -335,7 +363,9 @@ def render_bug(size, text=None):
     d = ImageDraw.Draw(img)
     d.rounded_rectangle((0, 0, img.width - 1, img.height - 1), radius=pad, fill=(8, 14, 30, 150))
     d.text((pad, int(fnt.size * 0.4)), text, font=fnt, fill=(235, 240, 250, 230))
-    return img, (int(w * 0.03), int(h * 0.035))
+    # right=True (long video): top-right, clear of the block tags drawn top-left.
+    x = w - int(w * 0.03) - img.width if right else int(w * 0.03)
+    return img, (x, int(h * 0.035))
 
 
 def _with_alpha(img, alpha):
@@ -422,12 +452,60 @@ def render_workers():
     return max(1, value)
 
 
-def _encoder_cmd(size, fps, crf, out_path, audio_path=None, total=None, threads=None):
+_FILTERS = {}
+
+
+def filter_available(name):
+    """True when this ffmpeg build has the named filter (e.g. 'subtitles' needs libass)."""
+    if name not in _FILTERS:
+        try:
+            out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True,
+                                 timeout=30).stdout
+            _FILTERS[name] = any(line.split()[1:2] == [name] for line in out.splitlines() if line.strip())
+        except (OSError, subprocess.SubprocessError):
+            _FILTERS[name] = False
+    return _FILTERS[name]
+
+
+def _filter_path(path):
+    """Absolute path for a single-quoted ffmpeg filter option (quotes keep ':' literal)."""
+    return str(Path(path).resolve()).replace("\\", "/")
+
+
+def grade_filter():
+    """Light contrast, vignette and subtle grain from the style guide ('' when turned off)."""
+    try:
+        from src import style
+        return str((style.look().get("grade") or {}).get("filters") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def finish_filter(ass_path=None, grade=True):
+    """Encoder-side look: grade first, then burned-in captions (kept clean of grain/vignette)."""
+    parts = []
+    if grade and grade_filter():
+        parts.append(grade_filter())
+    if ass_path and Path(ass_path).exists() and "'" not in str(Path(ass_path).resolve()) \
+            and filter_available("subtitles"):
+        from src import style
+        fonts = (style.ROOT / "assets/fonts/dypol")
+        parts.append(f"subtitles=filename='{_filter_path(ass_path)}':fontsdir='{_filter_path(fonts)}'")
+    return ",".join(parts)
+
+
+def _encoder_cmd(size, fps, crf, out_path, audio_path=None, total=None, threads=None, vf=None, offset=0.0):
+    """`vf` filters run on absolute video time: a chunk starting at `offset` seconds shifts its
+    timestamps for the filters (captions find their words) and back afterwards."""
     w, h = size
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
            "-s", f"{w}x{h}", "-r", str(fps), "-i", "-"]
     if audio_path is not None:
         cmd += ["-i", str(audio_path), "-map", "0:v", "-map", "1:a"]
+    if vf:
+        if offset:
+            vf = f"setpts=PTS+{offset:.6f}/TB,{vf},setpts=PTS-STARTPTS"
+        cmd += ["-vf", vf]
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p"]
     if threads:
         cmd += ["-threads", str(threads)]
@@ -478,10 +556,10 @@ def _compose_range(timeline, shot_assets, size, overlay_fn, fps, start, stop, wr
             src.close()
 
 
-def _render_serial(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress):
+def _render_serial(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress, vf=None):
     total = timeline["total"]
     frames = int(math.ceil(total * fps))
-    enc = subprocess.Popen(_encoder_cmd(size, fps, crf, out_path, audio_path, total), stdin=subprocess.PIPE)
+    enc = subprocess.Popen(_encoder_cmd(size, fps, crf, out_path, audio_path, total, vf=vf), stdin=subprocess.PIPE)
     try:
         _compose_range(timeline, shot_assets, size, overlay_fn, fps, 0, frames, enc.stdin.write, progress)
     finally:
@@ -500,7 +578,8 @@ def _render_chunk(index):
     job = _PARALLEL_JOB
     start, stop = job["bounds"][index]
     out = job["chunk_paths"][index]
-    enc = subprocess.Popen(_encoder_cmd(job["size"], job["fps"], job["crf"], out, threads=job["threads"]),
+    enc = subprocess.Popen(_encoder_cmd(job["size"], job["fps"], job["crf"], out, threads=job["threads"],
+                                        vf=job.get("vf"), offset=start / job["fps"]),
                            stdin=subprocess.PIPE)
     try:
         _compose_range(job["timeline"], job["shot_assets"], job["size"], job["overlay_fn"], job["fps"],
@@ -521,7 +600,8 @@ def chunk_bounds(frames, workers):
     return [(edges[k], edges[k + 1]) for k in range(workers) if edges[k + 1] > edges[k]]
 
 
-def _render_parallel(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress, workers):
+def _render_parallel(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress, workers,
+                     vf=None):
     import multiprocessing as mp
     import os
     import shutil
@@ -534,7 +614,7 @@ def _render_parallel(timeline, shot_assets, audio_path, out_path, size, overlay_
         chunk_paths = [tmp / f"chunk_{k:02d}.ts" for k in range(len(bounds))]
         _PARALLEL_JOB.clear()
         _PARALLEL_JOB.update(timeline=timeline, shot_assets=shot_assets, size=size, overlay_fn=overlay_fn,
-                             fps=fps, crf=crf, bounds=bounds, chunk_paths=chunk_paths, progress=progress,
+                             fps=fps, crf=crf, bounds=bounds, chunk_paths=chunk_paths, progress=progress, vf=vf,
                              threads=max(2, (os.cpu_count() or 2) // len(bounds)))
         ctx = mp.get_context("fork")
         with ctx.Pool(processes=len(bounds)) as pool:
@@ -556,14 +636,30 @@ def _render_parallel(timeline, shot_assets, audio_path, out_path, size, overlay_
 
 
 def render(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps=FPS, crf=21, progress=None,
-           workers=None):
+           workers=None, vf=None):
     """Compose frames and encode. `shot_assets[i]` is the asset dict for timeline shot i.
 
     With more than one worker the timeline is split into contiguous frame ranges
     rendered by separate processes (Python frame composition is the bottleneck),
     then stream-copy concatenated; same resolution, fps, CRF and preset as the
     single-pass path. Any parallel failure falls back to the single pass.
+    `vf` (grade + burned-in captions, see finish_filter) runs in the encoder; if the
+    render fails with it, it is retried once without it so a filter never loses a video.
     """
+    try:
+        return _render(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress,
+                       workers, vf)
+    except Exception as exc:  # noqa: BLE001
+        if not vf:
+            raise
+        if progress:
+            progress(f"render with finishing filters failed ({exc}); retrying without grade/captions")
+        Path(out_path).unlink(missing_ok=True)
+        return _render(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress,
+                       workers, None)
+
+
+def _render(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress, workers, vf):
     frames = int(math.ceil(timeline["total"] * fps))
     workers = render_workers() if workers is None else max(1, int(workers))
     workers = min(workers, max(1, frames // (fps * 4)))  # chunks of at least ~4 s
@@ -572,21 +668,22 @@ def render(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps=FP
             if progress:
                 progress(f"parallel render: {workers} chunks")
             return _render_parallel(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf,
-                                    progress, workers)
+                                    progress, workers, vf=vf)
         except Exception as exc:  # noqa: BLE001 - never lose a render to the speed path
             if progress:
                 progress(f"parallel render failed ({exc}); falling back to single pass")
             Path(out_path).unlink(missing_ok=True)
-    return _render_serial(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress)
+    return _render_serial(timeline, shot_assets, audio_path, out_path, size, overlay_fn, fps, crf, progress, vf=vf)
 
 
-def long_overlay(timeline, slides, bullet_times, size, hide_windows=()):
+def long_overlay(timeline, slides, bullet_times, size, hide_windows=(), captions=False):
     """Lower-third panel per slide; bullets fade/slide in at their narration times.
 
     `hide_windows` are (start, end) spans drawn by block renderers: they carry their own
-    text, so the lower third fades out over them.
+    text, so the lower third fades out over them. With burned-in `captions` the panel sits
+    higher so the caption line in the lower third stays clear.
     """
-    bug, bug_xy = render_bug(size)
+    bug, bug_xy = render_bug(size, right=True)
     hide_windows = sorted(hide_windows or ())
 
     def hidden(t):
@@ -595,7 +692,7 @@ def long_overlay(timeline, slides, bullet_times, size, hide_windows=()):
             if a - 0.3 <= t <= b + 0.3:
                 h = max(h, min(_ease((t - (a - 0.3)) / 0.3), _ease(((b + 0.3) - t) / 0.3)))
         return h
-    prepared = [render_lower_third(s, size) for s in slides]
+    prepared = [render_lower_third(s, size, bottom=0.17 if captions else 0.06) for s in slides]
     shift = int(36 * size[1] / 1080)
 
     def apply(frame, t):
@@ -623,8 +720,9 @@ def long_overlay(timeline, slides, bullet_times, size, hide_windows=()):
     return apply
 
 
-def short_overlay(word_times, size):
-    """Word-level burned-in captions centred ~20% from the bottom."""
+def short_overlay(word_times, size, captions=True):
+    """Channel bug + (legacy) Pillow word captions ~20% from the bottom. captions=False when the
+    ASS karaoke captions are burned in by the encoder instead."""
     chunks = sb.caption_chunks(word_times)
     starts = [c[0][1] for c in chunks]
     cache = {}
@@ -635,7 +733,7 @@ def short_overlay(word_times, size):
         frame = frame.convert("RGBA")
         frame.alpha_composite(bug, bug_xy)
         idx = None
-        for k in range(len(chunks)):
+        for k in (range(len(chunks)) if captions else ()):
             end = starts[k + 1] if k + 1 < len(chunks) else chunks[k][-1][2] + 0.6
             if (starts[k] - 0.05 if k else 0.0) <= t < end:
                 idx = k

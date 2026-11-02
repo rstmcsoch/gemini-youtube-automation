@@ -22,6 +22,9 @@ long:
     screen_change_min_s: 2.0
     screen_change_max_s: 4.0
     max_static_s: 6.0
+    target_shot_s: 3.0             # cuts land on narration clause boundaries near this length
+    chapter_card_s: [1.0, 1.5]     # chapter cards are short stingers
+    max_block_span_s: 10.0         # code_panel / diagram may run on across cuts (they animate throughout)
   variety:
     max_same_kind_run: 2           # never 3 blocks of the same kind in a row
     min_demo_share: 0.40           # share of shots that are demo-style blocks
@@ -75,3 +78,17 @@ look:
       license: assets/fonts/dypol/OFL-JetBrainsMono.txt
   motion:
     easing: ease_in_out_cubic
+  captions:
+    # Word-level ASS karaoke, burned in: the spoken word turns lime.
+    font_file: assets/fonts/dypol/SpaceGrotesk-Bold.ttf   # static 700 instance of the OFL variable font
+    family: Space Grotesk
+    long: {max_words: 6, max_chars: 40, size_px: 56, center_y: 0.885}
+    short: {min_words: 2, max_words: 4, max_chars: 22, size_px: 100, center_y: 0.63}
+  grade:
+    # ffmpeg filters on the encoder (cheap; runs per render chunk)
+    filters: "format=yuv420p,eq=contrast=1.06:saturation=1.04,vignette=angle=0.38,noise=alls=2:allf=t"
+  audio:
+    sfx_under_voice_db: 12         # whooshes / pops sit ~12 dB under the narration
+    clicks_under_voice_db: 22
+    sfx_per_min: [4, 8]
+    target_lufs: -14
