@@ -288,6 +288,16 @@
       "youtube_id": null,
       "origin": "dypol-topic-override",
       "uploads": []
+    },
+    {
+      "chapter": "Ad-hoc",
+      "part": "How AI powers self-driving cars",
+      "title": "How AI powers self-driving cars",
+      "topic": "How AI powers self-driving cars",
+      "status": "draft_ready",
+      "youtube_id": null,
+      "origin": "dypol-topic-override",
+      "uploads": []
     }
   ]
 }
