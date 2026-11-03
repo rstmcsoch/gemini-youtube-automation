@@ -314,8 +314,11 @@ _NUM_TOKEN = re.compile(r"^([$€£₹]?)(\d[\d,]*(?:\.\d+)?)(%|x|k|m|b|bn|ms|gb
 
 
 def spoken_number(words):
-    """First speakable number in a run of words -> count_up spec fields, else None (years skipped)."""
-    words = [str(w) for w in words]
+    """First speakable number in a run of words -> count_up spec fields, else None (years skipped).
+
+    Spelled-out numbers ("sixty-five percent") count too (src/numwords.py)."""
+    from src.numwords import normalize
+    words = [w for w in normalize(words) if w]
     for k, raw in enumerate(words):
         token = raw.strip(".,;:!?()\"'“”")
         m = _NUM_TOKEN.match(token)
@@ -971,7 +974,8 @@ def _find_number(words, value):
     want = re.sub(r"[^\d.]", "", str(value)).rstrip(".")
     if not want:
         return None
-    for i, (w, _, _) in enumerate(words):
+    from src.numwords import normalize
+    for i, w in enumerate(normalize([w for w, _, _ in words])):   # index-preserving
         if re.sub(r"[^\d.]", "", str(w)).rstrip(".") == want:
             return i
     return None

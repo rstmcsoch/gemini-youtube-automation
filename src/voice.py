@@ -27,7 +27,7 @@ KOKORO_SHA256 = {
 }
 DEFAULTS = {"provider": "kokoro", "voice": "am_michael", "speed": 1.08, "lang": "en-us",
             "model_file": "kokoro-v1.0.onnx", "wpm_min": 150, "wpm_max": 165, "wpm_target": 157,
-            "speed_min": 0.95, "speed_max": 1.3, "fallback": "gtts"}
+            "speed_min": 0.95, "speed_max": 1.4, "fallback": "gtts"}
 
 _STATE = {"engine": None, "speed": None, "meta": None}
 

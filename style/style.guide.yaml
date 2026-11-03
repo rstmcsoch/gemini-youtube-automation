@@ -15,7 +15,7 @@ voice:
   wpm_max: 165
   wpm_target: 157
   speed_min: 0.95
-  speed_max: 1.3
+  speed_max: 1.4                   # 1.3 capped the 3 Nov Short at 143 WPM; am_michael stays clear past 1.3
   fallback: gtts
 
 long:

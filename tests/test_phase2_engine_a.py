@@ -103,7 +103,8 @@ def test_spoken_number_parsing():
     spec = prod.spoken_number("about 70% of teams now trim".split())
     assert spec["value"] == "70" and spec["suffix"] == "%" and spec["label"]
     assert prod.spoken_number("prompts cost 3x more".split())["suffix"] == "x"
-    assert prod.spoken_number("forty two percent".split()) is None
+    # Spelled-out numbers count since 3 Nov 2026 (run 41646837309 got 1 count_up from a spelled-out script)
+    assert prod.spoken_number("forty-two percent".split())["value"] == "42"
     assert prod.spoken_number("back in 2024 we".split()) is None          # years are not count_ups
     assert prod.spoken_number("12 percent faster".split())["suffix"] == "%"
 

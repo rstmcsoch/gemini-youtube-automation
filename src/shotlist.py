@@ -207,7 +207,8 @@ def hook_issues(hook_line, wpm=None):
     if len(first) > rules["hook"]["max_first_sentence_words"]:
         issues.append(f"first sentence has {len(first)} words (> {rules['hook']['max_first_sentence_words']})")
     by_number = int(rules["hook"]["number_by_s"] * wpm / 60)
-    if not any(_NUM.search(w) for w in words[:by_number]):
+    from src.numwords import normalize
+    if not any(_NUM.search(w) for w in normalize(words[:by_number]) if w):
         issues.append(f"no number in the first {by_number} words (~{rules['hook']['number_by_s']:.0f} s)")
     return issues
 
@@ -244,6 +245,8 @@ PROMPT_RULES = """
         - Never 3 shots of the same kind in a row.
         - At least 40% of shots are demo-style (code_panel, diagram, count_up); stock_or_ai_still at most 15%.
         - Every number you say gets a count_up shot.
+        - Write every number in the narration as digits ("288.2 Kelvin", "65 percent", "10 seconds"), never spelled
+          out ("two hundred eighty-eight"). The voice reads digits naturally and the counters need them.
         - Something new appears on screen every 2-4 seconds: code types, diagram steps build, numbers count.
 """
 
