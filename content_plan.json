@@ -278,6 +278,16 @@
       "youtube_id": null,
       "origin": "dypol-topic-override",
       "uploads": []
+    },
+    {
+      "chapter": "Ad-hoc",
+      "part": "How AI predicts the weather",
+      "title": "How AI predicts the weather",
+      "topic": "How AI predicts the weather",
+      "status": "draft_ready",
+      "youtube_id": null,
+      "origin": "dypol-topic-override",
+      "uploads": []
     }
   ]
 }
