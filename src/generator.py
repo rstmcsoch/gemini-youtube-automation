@@ -208,8 +208,24 @@ def _throttle_tts():
 
 
 def text_to_speech(text, output_path):
-    """Converts text to speech using gTTS and ensures clean audio using WAV format."""
+    """Narration WAV for `text`: the DYPOL brand voice (Kokoro-82M am_michael, see src/voice.py and
+    style.guide.yaml -> voice), falling back to gTTS only if Kokoro cannot run."""
     print(f"🎤 Converting script to speech...")
+    from src import voice
+    cfg = voice.settings()
+    if cfg["provider"] == "kokoro":
+        wav_path = Path(str(output_path)).with_suffix('.wav')
+        try:
+            meta = voice.kokoro_speech(text, wav_path, cfg)
+            print(f"✅ Speech generated: Kokoro {meta['voice']} @ {meta['speed']} ({meta['wpm']:.0f} WPM)")
+            return wav_path
+        except Exception as e:  # noqa: BLE001 - the narration must not stop the draft
+            print(f"⚠️ VOICE_FALLBACK Kokoro failed ({str(e)[:160]}); using gTTS for this line")
+    return _gtts_speech(text, output_path)
+
+
+def _gtts_speech(text, output_path):
+    """Converts text to speech using gTTS and ensures clean audio using WAV format."""
     temp_mp3_path = str(output_path).replace('.mp3', '_temp.mp3')
     wav_path = str(output_path.with_suffix('.wav'))
 
@@ -278,10 +294,13 @@ def generate_curriculum(previous_titles=None):
         raise
 
 
-LONG_MIN_WORDS = 1150            # ~8.5 min of gTTS narration (the last drafts ran ~130 wpm with pauses)
-LONG_CHAPTER_WORDS = (180, 240)
-SHORT_WORDS = (120, 145)           # 50-65 s of gTTS
-SHORT_MIN_WORDS = 110
+LONG_MIN_WORDS = 1300            # ~8.3 min at the brand voice's 150-165 WPM (Kokoro am_michael)
+LONG_CHAPTER_WORDS = (190, 250)
+SHORT_WORDS = (135, 160)           # 50-62 s at ~157 WPM
+SHORT_MIN_WORDS = 125
+# A rewrite costs a whole extra model call (8 min in run 41460875234 for +158 words), so it
+# only runs when the script is clearly thin, not when it is a few words under the target.
+THIN_RATIO = 0.85
 
 
 def narration_words(content):
@@ -295,7 +314,7 @@ def ensure_depth(client, content, prompt):
     if not isinstance(content, dict) or len(content.get("long_form_slides") or []) < 3:
         return content
     long_words, short_words = narration_words(content)
-    if long_words >= LONG_MIN_WORDS and short_words >= SHORT_MIN_WORDS:
+    if long_words >= LONG_MIN_WORDS * THIN_RATIO and short_words >= SHORT_MIN_WORDS * THIN_RATIO:
         print(f"📏 Script depth ok: long {long_words} words, Short {short_words} words")
         return content
     print(f"📏 Script too thin (long {long_words}/{LONG_MIN_WORDS} words, Short {short_words}/{SHORT_MIN_WORDS}); "

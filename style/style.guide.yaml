@@ -2,6 +2,22 @@
 # Source: references/style-guide-proposal.md sections (b), (c) and "DYPOL's own look" (draft v0.1, 1 Nov 2026).
 version: 1
 
+# Brand narration voice, shared with Engine B (bake-off 3 Nov 2026: Kokoro am_michael was the most
+# intelligible male voice at 2x / 2.5x playback and pauses at every comma and full stop).
+# Env overrides: DYPOL_TTS_PROVIDER, KOKORO_VOICE, KOKORO_SPEED, KOKORO_MODEL_FILE, KOKORO_MODEL_DIR.
+voice:
+  provider: kokoro                 # kokoro | gtts (gtts is only the emergency fallback)
+  voice: am_michael                # Kokoro-82M American male (Apache-2.0, local CPU)
+  speed: 1.2                       # starting speed (technical scripts run ~135 WPM at 1.08); tuned per run toward wpm_target
+  lang: en-us
+  model_file: kokoro-v1.0.onnx     # kokoro-v1.0.int8.onnx is ~2.5x faster, same voice, quantised
+  wpm_min: 150
+  wpm_max: 165
+  wpm_target: 157
+  speed_min: 0.95
+  speed_max: 1.3
+  fallback: gtts
+
 long:
   narration:
     wpm_target: 158
@@ -86,8 +102,9 @@ look:
     long: {max_words: 6, max_chars: 40, size_px: 56, center_y: 0.885}
     short: {min_words: 2, max_words: 4, max_chars: 22, size_px: 100, center_y: 0.63}
   grade:
-    # ffmpeg filters on the encoder (cheap; runs per render chunk)
-    filters: "format=yuv420p,eq=contrast=1.06:saturation=1.04,vignette=angle=0.38,noise=alls=2:allf=t"
+    # ffmpeg filters on the encoder (runs per render chunk). vignette dither=0: the grain
+    # that follows already dithers, and vignette's own dither roughly doubled its cost.
+    filters: "format=yuv420p,eq=contrast=1.06:saturation=1.04,vignette=angle=0.38:dither=0,noise=alls=2:allf=t"
   audio:
     sfx_under_voice_db: 12         # whooshes / pops sit ~12 dB under the narration
     clicks_under_voice_db: 22

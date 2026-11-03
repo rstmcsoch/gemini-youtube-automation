@@ -141,23 +141,40 @@ def per_minute(events, total):
 
 
 def build_track(events, total, out_wav, voice_wav):
-    """Render the events to one 48 kHz stereo wav, levelled against the narration; None if nothing to add."""
+    """Render the events to one 48 kHz stereo wav, levelled against the narration; None if nothing to add.
+
+    Mixed in a numpy buffer: pydub's overlay copies the whole track per event, which took
+    ~5 min for a 12-min video with ~500 typing clicks (run 41460875234)."""
     if not events or not available():
         return None
+    import wave
+    import numpy as np
     from pydub import AudioSegment
+    rate = 48000
     r = audio_rules()
     voice = AudioSegment.from_file(str(voice_wav))
     voice_db = voice.dBFS if voice.dBFS != float("-inf") else -20.0
-    track = AudioSegment.silent(duration=int(total * 1000) + 50, frame_rate=48000).set_channels(2)
+    n = int(total * rate)
+    track = np.zeros((n + rate // 20, 2), dtype=np.float64)
     cache = {}
     for e in events:
         if e["clip"] not in cache:
-            seg = AudioSegment.from_file(str(clip_path(e["clip"]))).set_frame_rate(48000).set_channels(2)
+            seg = AudioSegment.from_file(str(clip_path(e["clip"]))).set_frame_rate(rate).set_channels(2) \
+                .set_sample_width(2)
             under = r["clicks_under_db"] if CLIPS[e["clip"]]["category"] == "click" else r["under_db"]
             level = seg.dBFS if seg.dBFS != float("-inf") else -20.0
-            cache[e["clip"]] = seg.apply_gain(voice_db - under - level)
-        seg = cache[e["clip"]].apply_gain(e.get("gain_db", 0.0))
-        track = track.overlay(seg, position=int(e["t"] * 1000))
-    track = track[: int(total * 1000)]
-    track.export(str(out_wav), format="wav")
+            seg = seg.apply_gain(voice_db - under - level)
+            cache[e["clip"]] = np.array(seg.get_array_of_samples(), dtype=np.float64).reshape(-1, 2)
+        clip = cache[e["clip"]] * (10 ** (float(e.get("gain_db", 0.0)) / 20.0))
+        at = int(round(float(e["t"]) * rate))
+        if at >= len(track) or at < 0:
+            continue
+        clip = clip[: len(track) - at]
+        track[at: at + len(clip)] += clip
+    pcm = np.clip(np.round(track[:n]), -32768, 32767).astype("<i2")
+    with wave.open(str(out_wav), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(pcm.tobytes())
     return Path(out_wav)

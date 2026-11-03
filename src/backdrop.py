@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageStat
 from src import style
 
 OVERSCAN = 1.16
+BASE_FPS = 15        # backdrop pan/zoom update rate; particles still move every frame
 MAX_MEAN_LUMA = 70.0          # backdrops sit dark so text and panels read on top
 MIN_MEAN_LUMA = 14.0
 
@@ -102,6 +103,7 @@ class Backdrop:
         if canvas is None:
             canvas = _clamp_luma(_field(big, seed))
         self.canvas = canvas
+        self._cache = None
         rng = random.Random(seed * 7 + 3)
         self.phase = rng.uniform(0, 2 * math.pi)
         self.period = rng.uniform(16.0, 24.0)
@@ -113,7 +115,31 @@ class Backdrop:
                                    rng.uniform(-30, -8) * s, rng.uniform(1.5, 4.0) * s,
                                    rng.uniform(0.18, 0.5), rng.choice(palette)))
 
+    def _base(self, t):
+        """Panned/zoomed canvas for time t, recomputed at BASE_FPS and reused in between.
+
+        The drift is slow (under ~1 px per 30 fps frame on a blurred field/photo), so updating
+        it 15x a second is invisible, while the full-frame resample was ~half of every block
+        frame's cost. The key is the quantised time, so chunked renders stay identical."""
+        key = math.floor(t * BASE_FPS + 1e-6)
+        if self._cache is not None and self._cache[0] == key:
+            return self._cache[1]
+        img = self._pan(key / BASE_FPS).convert("RGBA")
+        self._cache = (key, img)
+        return img
+
     def frame(self, t):
+        img = self._base(t).copy()
+        w, h = self.size
+        d = ImageDraw.Draw(img, "RGBA")          # blends each particle onto the frame (full 30 fps)
+        for px, py, vx, vy, r, alpha, color in self.particles:
+            x = (px + vx * t) % w
+            y = (py + vy * t) % h
+            flick = 0.65 + 0.35 * math.sin(t * 1.7 + px)
+            d.ellipse([x - r, y - r, x + r, y + r], fill=color + (int(255 * alpha * flick),))
+        return img
+
+    def _pan(self, t):
         w, h = self.size
         sw, sh = self.canvas.size
         # slow breathing zoom + Lissajous pan (one full loop every ~20 s)
@@ -124,14 +150,7 @@ class Backdrop:
         fx = 0.5 + 0.42 * math.sin(a)
         fy = 0.5 + 0.42 * math.cos(a * 0.8)
         x0, y0 = (sw - cw) * fx, (sh - ch) * fy
-        img = self.canvas.resize(self.size, Image.Resampling.BILINEAR, box=(x0, y0, x0 + cw, y0 + ch))
-        d = ImageDraw.Draw(img, "RGBA")          # blends each particle onto the frame
-        for px, py, vx, vy, r, alpha, color in self.particles:
-            x = (px + vx * t) % w
-            y = (py + vy * t) % h
-            flick = 0.65 + 0.35 * math.sin(t * 1.7 + px)
-            d.ellipse([x - r, y - r, x + r, y + r], fill=color + (int(255 * alpha * flick),))
-        return img.convert("RGBA")
+        return self.canvas.resize(self.size, Image.Resampling.BILINEAR, box=(x0, y0, x0 + cw, y0 + ch))
 
 
 def seed_for(*parts):

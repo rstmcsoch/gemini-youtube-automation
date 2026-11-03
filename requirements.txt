@@ -20,3 +20,6 @@ pydub
 # Engine A style guide (style/style.guide.yaml) and code_panel syntax colours
 PyYAML
 Pygments
+
+# Brand narration voice: Kokoro-82M (Apache-2.0) on CPU, shared with Engine B (src/voice.py)
+kokoro-onnx>=0.6.1,<0.7

@@ -215,6 +215,15 @@ jobs:
           path: ~/.cache/dypol-music
           key: dypol-music-open-lofi-v1.0.0
 
+      # Brand narration voice (Kokoro-82M, am_michael; see style/style.guide.yaml -> voice).
+      # src/voice.py downloads the official release files on a miss and checks their SHA-256.
+      - name: 🎤 Cache Kokoro-82M voice model
+        if: ${{ inputs.phase != 'publish' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/kokoro-onnx
+          key: kokoro-onnx-model-files-v1.0
+
       - name: 🚀 Run DYPOL phase-aware production pipeline
         id: production-run
         env:

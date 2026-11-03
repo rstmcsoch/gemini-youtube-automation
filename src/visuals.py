@@ -60,7 +60,7 @@ def trip_breaker(name, reason=""):
 
 def reset_breakers():
     _BREAKERS.clear()
-    _NVIDIA_STATE.update({"last": 0.0, "square_only": False, "disabled": ""})
+    _NVIDIA_STATE.update({"last": 0.0, "square_only": False, "disabled": "", "stalls": 0})
 
 
 def breaker_status():
@@ -86,7 +86,7 @@ NVIDIA_FLUX_PROVIDER = "nvidia_flux"
 NVIDIA_FLUX_SOURCE_URL = "https://build.nvidia.com/black-forest-labs/flux_1-schnell"
 NVIDIA_FLUX_LICENSE = "AI-generated with FLUX.1 [schnell] (Apache-2.0 model) on NVIDIA hosted NIM API"
 NVIDIA_FLUX_SIZES = {"landscape": (1344, 768), "portrait": (768, 1344)}
-_NVIDIA_STATE = {"last": 0.0, "square_only": False, "disabled": ""}
+_NVIDIA_STATE = {"last": 0.0, "square_only": False, "disabled": "", "stalls": 0}
 
 
 def _env_on(name, default="1"):
@@ -134,6 +134,18 @@ def _nvidia_image_b64(data):
     return None
 
 
+NVIDIA_READ_TIMEOUT = 45   # schnell answers in a few seconds when healthy
+NVIDIA_MAX_STALLS = 2      # consecutive timeouts / connection errors before NVIDIA is skipped for the run
+
+
+def _nvidia_stall(exc):
+    """Count a timeout / connection failure; after NVIDIA_MAX_STALLS in a row open the breaker.
+    (Draft run 41460875234 lost ~31 min to 17 back-to-back 90 s read timeouts.)"""
+    _NVIDIA_STATE["stalls"] = _NVIDIA_STATE.get("stalls", 0) + 1
+    if _NVIDIA_STATE["stalls"] >= NVIDIA_MAX_STALLS:
+        trip_breaker(NVIDIA_FLUX_PROVIDER, f"{_NVIDIA_STATE['stalls']} timeouts in a row ({str(exc)[:80]})")
+
+
 def nvidia_flux_request(prompt, orientation="landscape", seed=0):
     """One NVIDIA FLUX.1-schnell call -> image bytes, or None. Never raises.
     429 / quota opens the nvidia_flux breaker (one DYPOL_PROVIDER_LIMIT line)."""
@@ -147,11 +159,13 @@ def nvidia_flux_request(prompt, orientation="landscape", seed=0):
                 "seed": int(seed or 0) % 2147483647, "steps": 4}
         _nvidia_throttle()
         try:
-            response = requests.post(NVIDIA_FLUX_URL, json=body, timeout=(8, 90), headers={
+            response = requests.post(NVIDIA_FLUX_URL, json=body, timeout=(8, NVIDIA_READ_TIMEOUT), headers={
                 "Authorization": f"Bearer {key}", "Accept": "application/json"})
         except requests.RequestException as exc:
             print(f"NVIDIA FLUX request failed: {exc}")
+            _nvidia_stall(exc)
             return None
+        _NVIDIA_STATE["stalls"] = 0
         if response.status_code == 200:
             try:
                 b64 = _nvidia_image_b64(response.json())
@@ -924,6 +938,20 @@ def _stock_attempt(kind, query, terms, out_dir, used, px_orientation, label, ctx
 
 
 WIDENING_JUDGE_LIMIT = 2  # widening queries: judge at most 2 candidates each, no broadened re-fetch
+STOCK_VIDEOS_PER_CALL = 2  # stock clips per gather call (one slide): bounds download time
+
+
+def _widen(kinds, queries, out_dir, used, px_orientation, sub, ctx, jstate):
+    """Try each (query, terms) with each stock kind; judge at most WIDENING_JUDGE_LIMIT per query.
+    Each query is one cached Pixabay request; after a Pixabay 429 only cached results are served."""
+    for q, q_terms in queries:
+        for kind in kinds:
+            asset = _stock_attempt(kind, q, q_terms, out_dir, used, px_orientation, sub,
+                                   ctx=ctx, judge_limit=WIDENING_JUDGE_LIMIT, broaden=False, jstate=jstate)
+            if asset:
+                asset["fallback_query"] = True
+                return asset
+    return None
 
 
 def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s",
@@ -932,11 +960,10 @@ def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s
 
     spec: {"visual_queries": [...], "image_prompt": str, "terms": set}
     used: job-wide {"hashes": set(), "ids": set()} so third-party assets are used once.
-    Mix: one stock video, one stock still, FLUX for the rest.
-
-    When FLUX is unavailable (no credentials or its quota breaker tripped) the FLUX
-    slots are filled from Pixabay video + stills instead, trying every slide query
-    and then broad tech-anchor queries. A gradient graphic is only produced while
+    Stock first for every slot: topic Pixabay video (bounded per call), then Pixabay
+    stills, then the slide's other queries; FLUX (Cloudflare, else NVIDIA) only when
+    stock has nothing relevant, then broad tech-anchor stock queries. Every stock
+    candidate still goes through the frame judge and the licence gate. A gradient graphic is only produced while
     fewer than `min_count` assets exist (default: `count`, i.e. never fewer than
     asked); callers that can reuse real assets pass min_count=0 and fill the rest.
     """
@@ -954,55 +981,50 @@ def gather_visuals(spec, out_dir, count, used, orientation="landscape", label="s
     while len(slots) < count:
         slots.append("flux")
     slots = slots[:count]
-    if count >= 2 and "flux" not in slots:
-        slots[-1] = "flux"  # at least one reusable own visual per slide
     stock_kinds = [k for k, ok in (("video", allow_video), ("still", allow_still)) if ok]
     broad = sb.fallback_queries(terms, seed=seed)
     ctx = {"video_title": spec.get("video_title", ""), "narration": spec.get("narration", "")}
     assets, flux_n = [], 0
+    videos = 0
     for index, slot in enumerate(slots):
         query = queries[index % len(queries)]
         asset = None
         jstate = {}
         sub = f"{label}_{index}"
-        order = {"video": ["video", "still", "flux"], "still": ["still", "flux"], "flux": ["flux", "still"]}[slot]
+        # Stock first (topic Pixabay video, then Pixabay stills) for every slot; FLUX only
+        # when stock has nothing relevant. Cloudflare's free FLUX allocation runs out daily
+        # and NVIDIA's fallback can stall, so AI stills are the exception, not the plan.
+        # Clip downloads stay bounded: a video is tried for the video slot and at most one
+        # more slot per call (STOCK_VIDEOS_PER_CALL).
+        want_video = allow_video and (slot == "video" or videos < STOCK_VIDEOS_PER_CALL)
+        order = (["video"] if want_video else []) + (["still"] if allow_still else [])
         for provider in order:
-            if provider in ("video", "still"):
-                if (provider == "video" and allow_video) or (provider == "still" and allow_still):
-                    asset = _stock_attempt(provider, query, terms, out_dir, used, px_orientation, sub,
-                                           ctx=ctx, jstate=jstate)
-            elif provider == "flux" and ai_image_available():
-                variant = _FLUX_VARIANTS[flux_n % len(_FLUX_VARIANTS)]
-                asset = flux_generate(f"{spec.get('image_prompt') or query}, {variant}",
-                                      out_dir / f"{sub}_flux.png", orientation,
-                                      seed=seed * 31 + index)
-                flux_n += 1
-                if asset and asset["sha256"] in used["hashes"]:
-                    asset = None
-                if asset:
-                    used["hashes"].add(asset["sha256"])
+            asset = _stock_attempt(provider, query, terms, out_dir, used, px_orientation, sub,
+                                   ctx=ctx, jstate=jstate)
             if asset:
                 break
         if asset is None and stock_kinds:
-            # Stock widening: other slide queries first (strict topic gate), then broad
-            # tech-anchor queries whose own words may prove relevance. Each query is one
-            # cached Pixabay request; after a Pixabay 429 only cached results are served.
-            # At most one extra clip per slide (index 2) keeps downloads bounded; stills otherwise.
-            first = "video" if slot == "video" or (slot == "flux" and index == 2) else "still"
-            kinds = [first] + [k for k in ("video", "still") if k != first]
-            kinds = [k for k in kinds if k in stock_kinds]
-            extra = [(q, terms) for q in queries if q != query]
-            extra += [(q, terms | sb.topic_terms(q)) for q in broad]
-            for q, q_terms in extra:
-                for kind in kinds:
-                    asset = _stock_attempt(kind, q, q_terms, out_dir, used, px_orientation, sub,
-                                           ctx=ctx, judge_limit=WIDENING_JUDGE_LIMIT, broaden=False,
-                                           jstate=jstate)
-                    if asset:
-                        asset["fallback_query"] = True
-                        break
-                if asset:
-                    break
+            # Topic widening: the slide's other queries (strict topic gate) before any AI still.
+            kinds = (["video"] if want_video else []) + (["still"] if allow_still else [])
+            asset = _widen(kinds, [(q, terms) for q in queries if q != query], out_dir, used,
+                           px_orientation, sub, ctx, jstate)
+        if asset is None and ai_image_available():
+            variant = _FLUX_VARIANTS[flux_n % len(_FLUX_VARIANTS)]
+            asset = flux_generate(f"{spec.get('image_prompt') or query}, {variant}",
+                                  out_dir / f"{sub}_flux.png", orientation,
+                                  seed=seed * 31 + index)
+            flux_n += 1
+            if asset and asset["sha256"] in used["hashes"]:
+                asset = None
+            if asset:
+                used["hashes"].add(asset["sha256"])
+        if asset is None and stock_kinds:
+            # Last stock resort: broad tech-anchor queries whose own words may prove relevance.
+            kinds = [k for k in (["still", "video"] if not want_video else ["video", "still"]) if k in stock_kinds]
+            asset = _widen(kinds, [(q, terms | sb.topic_terms(q)) for q in broad], out_dir, used,
+                           px_orientation, sub, ctx, jstate)
+        if asset is not None and asset.get("kind") == "video":
+            videos += 1
         if asset is None:
             if len(assets) >= min_count:
                 continue  # caller reuses real assets instead of a placeholder
