@@ -176,7 +176,9 @@ def mix_music_and_normalize(narration_wav, out_wav, music_path=None, music_db=-2
                             sfx_path=None):
     """Mix quiet music (music_db, default -26 dB, 1.5 s fade in / 2 s fade out, ducked under the
     voice) and an optional SFX track under narration, then loudnorm to -14 LUFS (two-pass, true
-    peak -1.5 dBTP). music_path=None renders narration (+ SFX) only."""
+    peak target -2 dBTP) and a 4x-oversampled true-peak limiter at -2 dBTP, which leaves ~1 dB for
+    AAC overshoot so the final file stays at or under -1 dBTP (enforce_true_peak checks the mp4).
+    music_path=None renders narration (+ SFX) only."""
     total = audio_duration(narration_wav)
     mixed = Path(str(out_wav) + ".mix.wav")
     music = bool(music_path and Path(music_path).exists())
@@ -192,7 +194,7 @@ def mix_music_and_normalize(narration_wav, out_wav, music_path=None, music_db=-2
     else:
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(narration_wav), str(mixed)]
     subprocess.run(cmd, check=True)
-    params = f"I={target_lufs}:TP=-1.5:LRA=11"
+    params = f"I={target_lufs}:TP={WAV_TRUE_PEAK_DBTP}:LRA=11"
     err = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(mixed), "-af",
                           f"loudnorm={params}:print_format=json", "-f", "null", "-"],
                          capture_output=True, text=True, check=True).stderr
@@ -200,10 +202,60 @@ def mix_music_and_normalize(narration_wav, out_wav, music_path=None, music_db=-2
     second = (f"loudnorm={params}:measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
               f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
               f":offset={measured['target_offset']}:linear=true")
-    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(mixed), "-af", second,
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(mixed), "-af",
+                    f"{second},{true_peak_limiter(WAV_TRUE_PEAK_DBTP)}",
                     "-ar", "48000", "-t", f"{total:.3f}", str(out_wav)], check=True)
     mixed.unlink(missing_ok=True)
     return Path(out_wav)
+
+
+MAX_TRUE_PEAK_DBTP = -1.0     # owner rule (4 Nov 2026): the long video measured -0.2 dBTP
+WAV_TRUE_PEAK_DBTP = -2.0     # mix target; ~1 dB headroom for AAC encoder overshoot
+
+
+def true_peak_limiter(limit_dbtp):
+    """Brick-wall limiter run at 4x oversampling (192 kHz), so inter-sample (true) peaks are caught,
+    then back to 48 kHz. alimiter alone only sees sample peaks."""
+    lin = 10 ** (limit_dbtp / 20.0)
+    return (f"aresample=192000,alimiter=limit={lin:.5f}:attack=1:release=50:level=false:asc=1,"
+            f"aresample=48000")
+
+
+def measure_true_peak(path):
+    """True peak of the first audio stream in dBTP (ebur128 peak=true), None when not measurable."""
+    import re
+    err = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-map", "0:a:0", "-af",
+                          "ebur128=peak=true", "-f", "null", "-"], capture_output=True, text=True).stderr
+    summary = err[err.rfind("Summary:"):] if "Summary:" in err else ""
+    m = re.search(r"True peak:\s+Peak:\s+(-?[\d.]+|-inf) dBFS", summary)
+    if not m:
+        return None
+    return float("-inf") if m.group(1) == "-inf" else float(m.group(1))
+
+
+def enforce_true_peak(video_path, max_dbtp=MAX_TRUE_PEAK_DBTP, log=None, tries=2):
+    """Measure the final mp4's true peak; when above max_dbtp, re-encode only the audio (video stream
+    copied) with a gain cut plus the oversampled limiter, and measure again. At most `tries` passes
+    (never loops). Returns {"before", "after", "passes"}."""
+    log = log or (lambda m: None)
+    video_path = Path(video_path)
+    before = tp = measure_true_peak(video_path)
+    passes = 0
+    while tp is not None and tp > max_dbtp and passes < tries:
+        passes += 1
+        # Pass 1 only limits the peaks (loudness kept); pass 2 also trims the gain a little.
+        cut = 0.0 if passes == 1 else min(0.0, (max_dbtp - 0.4) - tp)
+        limit = max_dbtp - 0.8 - (passes - 1) * 0.4
+        tmp = video_path.with_name(video_path.stem + f".tp{passes}" + video_path.suffix)
+        subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video_path),
+                        "-map", "0:v?", "-map", "0:a", "-c:v", "copy", "-af",
+                        f"volume={cut:.2f}dB,{true_peak_limiter(limit)}", "-c:a", "aac", "-b:a", "192k",
+                        "-movflags", "+faststart", str(tmp)], check=True)
+        tmp.replace(video_path)
+        tp = measure_true_peak(video_path)
+        log(f"true peak {before:.2f} dBTP > {max_dbtp:g}; audio pass {passes}: gain {cut:.2f} dB -> "
+            f"{tp if tp is None else round(tp, 2)} dBTP")
+    return {"before": before, "after": tp, "passes": passes}
 
 
 def measure_lufs(path):

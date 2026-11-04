@@ -432,6 +432,98 @@ def ensure_depth(client, content, prompt, topic=None):
     return content
 
 
+def _short_hook_text(content):
+    if not isinstance(content, dict):
+        return ""
+    return str(content.get("short_hook") or content.get("short_script") or "")
+
+
+def enforce_short_hook(client, content):
+    """Owner rule (4 Nov 2026, same as Engine B): the Short's hook carries a concrete number or a
+    surprising specific. A vague hook gets ONE strong-model rewrite of the Short's opening; the rewrite
+    is kept only when its hook passes. The outcome is stored in content["_short_hook"]."""
+    from src import short_rules as sr
+    if not isinstance(content, dict) or not str(content.get("short_script") or "").strip():
+        return content
+    kind = sr.hook_specific(_short_hook_text(content))
+    if kind:
+        content["_short_hook"] = {"specific": kind, "rewritten": False}
+        return content
+    old_hook = sr.first_sentence(_short_hook_text(content))
+    print(f"🪝 Short hook has no number or surprising specific ({old_hook[:80]!r}); asking for one rewrite", flush=True)
+    ask = f"""
+        Rewrite ONLY the opening of this YouTube Short. The current hook is: "{old_hook}".
+        The new hook is one plain spoken sentence of at most 12 words, with a subject and a verb, that CONTAINS a
+        concrete number written in digits (a real, published figure you could name the source for) or, only if
+        there is no real figure, a surprising concrete specific (a measured comparison such as "faster than most
+        doctors", a speed or a size). Never invent a figure. No question-only hooks, no "ever wondered", no
+        "let me explain", no greeting, no channel name, no dash fragments.
+        Return only valid JSON with these keys:
+        "short_hook": the new hook (at most 12 words),
+        "short_script": the full Short narration starting with the exact new hook; keep everything after the old
+                        hook unchanged except for one connecting word if needed; no call to action,
+        "short_hook_number": {{"value": "...", "source": "publisher + year"}} or null.
+
+        CURRENT SHORT SCRIPT:
+        {str(content.get("short_script") or "")[:4000]}
+        """
+    try:
+        reply = _generate_text_with_fallback(client, ask, task_name="Short hook rewrite", strong_only=True,
+                                             delays=(10,))
+        better = json.loads(reply.text.strip().replace("```json", "").replace("```", ""))
+        new_hook = " ".join(str(better.get("short_hook") or "").split())
+        new_script = " ".join(str(better.get("short_script") or "").split())
+        new_kind = sr.hook_specific(new_hook or new_script)
+        if new_kind and new_script and len(new_script.split()) >= 0.8 * len(str(content["short_script"]).split()):
+            content["short_hook"] = new_hook or sr.first_sentence(new_script)
+            content["short_script"] = new_script
+            if isinstance(content.get("short"), dict):
+                plan = dict(content["short"])
+                plan["hook"] = sr.first_sentence(new_script)
+                content["short"] = plan
+            content["_short_hook"] = {"specific": new_kind, "rewritten": True, "before": old_hook}
+            print(f"🪝 Short hook rewritten ({new_kind}): {content['short_hook'][:90]!r}", flush=True)
+            return content
+        print("🪝 Short hook rewrite still had no number or specific; keeping the first hook", flush=True)
+    except Exception as exc:  # noqa: BLE001 - the first hook still makes a Short
+        print(f"⚠️ Short hook rewrite failed ({str(exc)[:120]}); keeping the first hook", flush=True)
+    content["_short_hook"] = {"specific": "", "rewritten": False,
+                              "warning": "Short hook has no concrete number or surprising specific"}
+    return content
+
+
+def expand_short_script(script, extra_words, topic=""):
+    """ONE strong-model rewrite that makes the Short longer with real content (owner rule, 4 Nov 2026:
+    reach 50 s with content, never by slowing the voice below 150 WPM). Returns the longer script, or
+    the original when no strong model answers."""
+    script = " ".join(str(script or "").split())
+    target = len(script.split()) + max(10, int(extra_words))
+    ask = f"""
+        This YouTube Short narration{f' about "{topic}"' if topic else ''} is too short. Rewrite it to about
+        {target} words (it is {len(script.split())} now) by adding real content: one more concrete how-it-works
+        detail or example with real-looking inputs and outputs, or a sharper explanation of the catch. Keep the
+        first sentence (the hook) exactly as it is, keep the order hook -> how it works -> the catch -> takeaway,
+        plain spoken sentences, numbers in digits, no filler, no repetition, no hashtags, no emojis and NO call to
+        action. Return only valid JSON: {{"short_script": "..."}}
+
+        CURRENT SHORT SCRIPT:
+        {script[:4000]}
+        """
+    try:
+        client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+        reply = _generate_text_with_fallback(client, ask, task_name="Short content rewrite", strong_only=True,
+                                             delays=(10,))
+        better = json.loads(reply.text.strip().replace("```json", "").replace("```", ""))
+        longer = " ".join(str(better.get("short_script") or "").split())
+        from src import short_rules as sr
+        if longer and sr.first_sentence(longer)[:40].casefold() != sr.first_sentence(script)[:40].casefold():
+            longer = f"{sr.first_sentence(script)} {longer.split(' ', len(sr.first_sentence(longer).split()))[-1]}"
+        return longer if len(longer.split()) > len(script.split()) else script
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ Short content rewrite failed ({str(exc)[:120]}); keeping the first script", flush=True)
+        return script
+
+
 def generate_lesson_content(lesson_title, reviewer_feedback=None):
     """Generates the content for one long-form lesson and its promotional short."""
     print(f"🤖 Generating content for lesson: '{lesson_title}'...")
@@ -458,7 +550,11 @@ def generate_lesson_content(lesson_title, reviewer_feedback=None):
              no text, letters or numbers, and no screens or documents showing writing.
            - "shots": the chapter's shot list (see SHOT LIST RULES below).
         2. "short_form_highlight": A single, punchy, 1-2 sentence summary for a YouTube Short.
-        3. "short_hook": A scroll-stopping opening line for the Short, at most 8 words (a question or surprising fact).
+        3. "short_hook": A scroll-stopping opening line for the Short, at most 8 words (one plain sentence). It MUST
+           contain a concrete number written in digits (a real, published figure) or, only if there is no real
+           figure, a surprising concrete specific (a measured comparison such as "faster than a doctor", a speed or a
+           size). A hook with neither is rejected. Good: "Your phone checks 30,000 face points per photo." Bad:
+           "Ever wondered how your phone sorts photos?"
         4. "short_script": The Short's full narration, {{short_min}}-{{short_max}} words (50-65 seconds), starting with
            the exact short_hook, plain spoken sentences, no hashtags, no emojis, and NO call to action (no
            "subscribe", "follow", "full video", "link"). It is exactly the texts of "short" below joined in order.
@@ -509,6 +605,7 @@ def _strong_on_topic_script(client, prompt, lesson_title):
             model = LAST_TEXT_MODEL
             content = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
             content = ensure_depth(client, content, prompt, topic=lesson_title)
+            content = enforce_short_hook(client, content)
             rel = script_relevance(client, lesson_title, content)
             if rel["verdict"] != tg.OFF_TOPIC:
                 if rel["verdict"] == tg.BORDERLINE:

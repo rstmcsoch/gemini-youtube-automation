@@ -155,6 +155,18 @@ def _mix_audio(narration, out_wav, sfx_path=None):
     return audio, ({k: v for k, v in music.items() if k != "path"} if music else {"provider": "none"})
 
 
+def _enforce_true_peak(out_path, label):
+    """-1 dBTP ceiling on the final file (QC fails the draft above it); never blocks the render."""
+    try:
+        result = ex.enforce_true_peak(out_path, log=lambda m: _log(f"{label}: {m}"))
+        if result.get("after") is not None:
+            _log(f"{label}: true peak {result['after']:.2f} dBTP (limit {ex.MAX_TRUE_PEAK_DBTP:g})")
+        return result
+    except Exception as exc:  # noqa: BLE001 - QC still measures and flags it
+        _log(f"{label}: true-peak check failed ({str(exc)[:120]})")
+        return {}
+
+
 def _is_real(asset):
     return bool(asset) and asset.get("provider") != sb.GRAPHIC_PROVIDER
 
@@ -861,6 +873,7 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
                                             for g in sorted(fixed)], captions=burned)
     _log(f"rendering long video: {timeline['total']:.1f}s, {len(timeline['shots'])} shots")
     ex.render(timeline, shot_assets, audio, out_path, LONG_SIZE, overlay, progress=_log, vf=vf)
+    true_peak = _enforce_true_peak(out_path, "long video")
     judge_summary = _judge_finish(
         "long", shot_assets,
         lambda k: (slides[timeline["shots"][k]["slide"]].get("content")
@@ -875,7 +888,7 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
     if sfx_path:
         Path(sfx_path).unlink(missing_ok=True)
     return {"manifest": manifest, "timeline": timeline, "judge": judge_summary, "captions_path": captions_path,
-            "music": music, "sfx": sfx_summary, "style_check": style_check,
+            "true_peak": true_peak, "music": music, "sfx": sfx_summary, "style_check": style_check,
             "own_assets": [a for assets in per_slide_assets for a in assets
                            if a.get("reusable") and _is_real(a)],
             # Stock stills survive cleanup; the Short may reuse them before any gradient.
@@ -884,10 +897,14 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
                              and not a.get("borrowed")]}
 
 
-def fit_short_audio(tts_fn, script, cta, work_dir, lo=None, hi=None):
-    """TTS the Short and bring it into [lo, hi] s (default 50-65 s): silence trimmed, tempo nudged
-    (at most 10 % slower or 25 % faster), sentences cut once if far too long. `cta` is only
-    appended when given (the DYPOL Short has no CTA)."""
+def fit_short_audio(tts_fn, script, cta, work_dir, lo=None, hi=None, expand_fn=None):
+    """TTS the Short and bring it into [lo, hi] s (default 50-65 s): silence trimmed; too long ->
+    tempo up to 25 % faster or sentences cut once. Too short -> ONE script rewrite with more
+    content (`expand_fn(script, extra_words) -> longer script`), re-voiced; only what is still
+    missing may be closed by slowing, and the voice is never slowed below 150 WPM (owner rule,
+    4 Nov 2026: the old x0.90 slow-down took it to ~125 WPM). `cta` is only appended when given
+    (the DYPOL Short has no CTA)."""
+    from src import short_rules as sr
     lo = SHORT_MIN if lo is None else lo
     hi = SHORT_MAX if hi is None else hi
     work_dir = Path(work_dir)
@@ -899,11 +916,36 @@ def fit_short_audio(tts_fn, script, cta, work_dir, lo=None, hi=None):
         raw = tts_fn(script, work_dir / "short_voice_cta.mp3")
         voice = ex.trim_silence(raw, work_dir / "short_voice_cta_trim.wav")
         dur = ex.audio_duration(voice)
+    if dur < lo and expand_fn is not None:
+        words = len(script.split())
+        extra = sr.words_needed(words, dur, lo + 1.0)
+        try:
+            longer = " ".join(str(expand_fn(script, extra) or "").split())
+        except Exception as exc:  # noqa: BLE001 - the first script still makes a Short
+            longer = ""
+            _log(f"short: content rewrite failed ({str(exc)[:120]})")
+        if len(longer.split()) > words:
+            raw2 = tts_fn(longer, work_dir / "short_voice_more.mp3")
+            voice2 = ex.trim_silence(raw2, work_dir / "short_voice_more_trim.wav")
+            dur2 = ex.audio_duration(voice2)
+            if dur2 > dur and dur2 <= hi + 8.0:
+                _log(f"short: {dur:.1f}s < {lo:.0f}s; rewrite with more content -> {dur2:.1f}s "
+                     f"({words} -> {len(longer.split())} words)")
+                script, voice, dur = longer, voice2, dur2
+            else:
+                _log(f"short: rewrite gave {dur2:.1f}s; keeping the first script")
+        else:
+            _log("short: rewrite was not longer; keeping the first script")
     if dur < lo:
-        factor = max(0.9, dur / (lo + 0.3))
+        words = len(script.split())
+        factor = sr.slow_factor(words, dur, lo + 0.3)
         if factor < 0.995:
             voice = ex.change_tempo(voice, work_dir / "short_voice_slow.wav", factor)
-            _log(f"short: voice {dur:.1f}s < {lo:.0f}s; slowed to x{factor:.2f}")
+            _log(f"short: voice {dur:.1f}s < {lo:.0f}s; slowed x{factor:.3f} "
+                 f"({sr.wpm(words, dur):.0f} -> {sr.wpm(words, dur / factor):.0f} WPM, floor {sr.MIN_WPM:.0f})")
+            dur = dur / factor
+        if dur < lo - 0.05:
+            _log(f"short: {dur:.1f}s stays under {lo:.0f}s; the voice is not slowed below {sr.MIN_WPM:.0f} WPM")
     elif dur > hi:
         factor = dur / (hi - 1.0)
         if factor <= 1.25:
@@ -1201,6 +1243,7 @@ def produce_short(script, voice_path, out_dir, out_path, gather, used, spec, own
     overlay = ex.short_overlay(words, SHORT_SIZE, captions=not burned)
     _log(f"rendering Short: {total:.1f}s, {n_shots} shots")
     ex.render(timeline, shot_assets, audio, out_path, SHORT_SIZE, overlay, vf=vf)
+    _enforce_true_peak(out_path, "short")
 
     def _short_line(k):
         shot = timeline["shots"][k]

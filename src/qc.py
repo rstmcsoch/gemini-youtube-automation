@@ -61,7 +61,7 @@ def resolution_problem(label, width, height):
 
 def hard_failures(report, relevance=None):
     """Owner-rule failures that make the draft "needs fixes": off-topic script, resolution outside
-    720p-1080p, a static picture longer than 3.5 s."""
+    720p-1080p, a static picture longer than 3.5 s, a true peak above -1 dBTP (4 Nov 2026)."""
     out = []
     if isinstance(relevance, dict) and relevance.get("verdict") == "off_topic":
         out.append("off-topic script: " + "; ".join(relevance.get("reasons") or [])[:300])
@@ -69,6 +69,9 @@ def hard_failures(report, relevance=None):
         problem = resolution_problem(label, video.get("width"), video.get("height"))
         if problem:
             out.append(problem)
+        tp = (video.get("loudness") or {}).get("true_peak_dbtp")
+        if tp is not None and tp > MAX_TRUE_PEAK:
+            out.append(f"{label}: true peak {tp:.1f} dBTP (limit {MAX_TRUE_PEAK:g} dBTP)")
         for f in video.get("freezes") or []:
             if (f.get("duration") or 0) > HARD_STATIC_S:
                 out.append(f"{label}: picture static for {f['duration']:.1f} s at {f['start']:.1f} s "

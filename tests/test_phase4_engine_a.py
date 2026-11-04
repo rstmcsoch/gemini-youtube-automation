@@ -159,9 +159,13 @@ def _tone(path, seconds):
 
 
 def test_short_audio_lands_in_50_to_65_seconds(tmp_path):
+    # 4 Nov 2026: too short -> one content rewrite (expand_fn), never slowed below 150 WPM.
     short_voice = _tone(tmp_path / "s.wav", 46.0)
-    _, voice = prod.fit_short_audio(lambda text, path: short_voice, "Hook. Body.", "", tmp_path)
-    assert ex.audio_duration(voice) >= 49.0
+    more_voice = _tone(tmp_path / "m.wav", 53.0)
+    script = " ".join(["word"] * 120)                     # 120 words in 46 s = 157 WPM
+    out, voice = prod.fit_short_audio(lambda text, path: more_voice if len(text.split()) > 120 else short_voice,
+                                      script, "", tmp_path, expand_fn=lambda s, n: s + " more" * n)
+    assert ex.audio_duration(voice) >= 50.0 and len(out.split()) > 120
     long_voice = _tone(tmp_path / "l.wav", 72.0)
     _, voice = prod.fit_short_audio(lambda text, path: long_voice, "Hook. Body.", "", tmp_path)
     assert ex.audio_duration(voice) <= prod.SHORT_MAX
@@ -170,7 +174,8 @@ def test_short_audio_lands_in_50_to_65_seconds(tmp_path):
 def test_main_short_has_no_cta_and_uses_the_plan():
     from pathlib import Path
     main = (Path(prod.__file__).resolve().parent.parent / "main.py").read_text()
-    assert 'fit_short_audio(text_to_speech, short_script, "", short_slide_dir)' in main
+    assert 'fit_short_audio(text_to_speech, short_script, "", short_slide_dir,' in main
+    assert "expand_fn=lambda s, n: expand_short_script(s, n, lesson['title'])" in main
     assert "plan=short_plan" in main
 
 

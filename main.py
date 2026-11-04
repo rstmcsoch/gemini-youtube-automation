@@ -9,6 +9,7 @@ from pathlib import Path
 from src.generator import (
     generate_curriculum,
     generate_lesson_content,
+    expand_short_script,
     text_to_speech,
     generate_visuals,
     create_video,
@@ -162,7 +163,7 @@ def generate_lesson_assets(lesson):
 
     print("\n--- Producing Short Video ---")
     highlight_text = (lesson_content.get("short_form_highlight") or "").strip()
-    hook = sb.clamp_bullet(lesson_content.get("short_hook") or "", 8)
+    hook = sb.clamp_bullet(lesson_content.get("short_hook") or "", 12)
     short_plan = lesson_content.get("short") if isinstance(lesson_content.get("short"), dict) else {}
     short_script = " ".join(str(lesson_content.get("short_script") or "").split())
     if short_plan:
@@ -173,7 +174,7 @@ def generate_lesson_assets(lesson):
         planned = " ".join(" ".join(str(p).split()) for p in parts if p)
         if len(planned.split()) >= max(60, len(short_script.split()) - 10):
             short_script = planned
-        hook = hook or sb.clamp_bullet(short_plan.get("hook") or "", 8)
+        hook = hook or sb.clamp_bullet(short_plan.get("hook") or "", 12)
     if len(short_script.split()) < 25:
         short_script = f"{hook + '. ' if hook else ''}{highlight_text}".strip()
     if hook and not short_script.casefold().startswith(hook.casefold()[:12]):
@@ -182,7 +183,9 @@ def generate_lesson_assets(lesson):
     print(f"📝 Short script: {len(short_script.split())} words")
     short_slide_dir = OUTPUT_DIR / f"slides_short_{unique_id}"
     short_slide_dir.mkdir(parents=True, exist_ok=True)
-    short_script, short_voice = fit_short_audio(text_to_speech, short_script, "", short_slide_dir)
+    # Too short for 50 s -> one rewrite with more content; the voice never goes under 150 WPM.
+    short_script, short_voice = fit_short_audio(text_to_speech, short_script, "", short_slide_dir,
+                                                expand_fn=lambda s, n: expand_short_script(s, n, lesson['title']))
     short_queries = sb.normalize_queries(lesson_content.get("short_visual_queries"),
                                          " ".join(q for s in body_slides for q in s["visual_queries"]))
     short_spec = {"visual_queries": short_queries, "image_prompt": intro_slide["image_prompt"],
@@ -215,14 +218,18 @@ def generate_lesson_assets(lesson):
                       "contact": qc_report.get("contact"), "hard_failures": qc_report.get("hard_failures", [])}
     except Exception as exc:  # noqa: BLE001 - QC never blocks a draft
         print(f"⚠️ QC skipped: {exc}")
-    # Hard failures (off-topic, resolution, static > 3.5 s) mark the draft "needs fixes" in its result.
+    hook_meta = lesson_content.get("_short_hook") if isinstance(lesson_content.get("_short_hook"), dict) else {}
+    if hook_meta.get("warning"):
+        qc_summary["warnings"] = list(qc_summary.get("warnings") or []) + [f"short: {hook_meta['warning']}"]
+    # Hard failures (off-topic, resolution, static > 3.5 s, true peak > -1 dBTP) mark the draft "needs fixes".
     hard_failures = list(qc_summary.get("hard_failures") or [])
     relevance = script_meta.get("relevance") or {}
     if relevance.get("verdict") == "off_topic" and not any(h.startswith("off-topic") for h in hard_failures):
         hard_failures.insert(0, "off-topic script: " + "; ".join(relevance.get("reasons") or [])[:300])
     quality = {"verdict": "needs_fixes" if hard_failures else "ok", "hard_failures": hard_failures,
                "script_model": script_meta.get("model", ""),
-               "topic_check": relevance.get("verdict", "not_run")}
+               "topic_check": relevance.get("verdict", "not_run"),
+               "short_hook": hook_meta.get("specific") or "missing"}
 
     hashtags = lesson_content.get("hashtags", "#AI #Developer #LearnAI")
     long_desc = (
