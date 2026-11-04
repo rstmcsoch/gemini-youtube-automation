@@ -1,4 +1,4 @@
-"""Post-render QC for Engine A drafts: warnings only, never blocks a draft.
+"""Post-render QC for Engine A drafts: never blocks a draft, but hard failures mark it "needs fixes".
 
 One ffmpeg pass per video runs ebur128 (loudness), silencedetect, blackdetect and
 freezedetect (on a downscaled copy, so it is cheap); a small contact sheet shows
@@ -18,7 +18,11 @@ MAX_TRUE_PEAK = -1.0
 SILENCE_DB, SILENCE_MIN_S = -45, 2.0
 BLACK_MIN_S, BLACK_PIX_TH = 0.5, 0.04   # the DYPOL slate (#0F141C) must not count as black
 FREEZE_NOISE_DB = -60
-MAX_CONTACT_BYTES = 1_500_000   # the preview artifact holds ~1-3 MB mp4s; keep the sheet well under that
+MAX_CONTACT_BYTES = 1_500_000
+# Hard failures (owner rules): the draft is still saved, but its result says "needs_fixes".
+HARD_STATIC_S = 3.5                      # nothing on screen may stay static longer than this
+LONG_RES = ((1280, 720), (1920, 1080))   # 16:9, 720p-1080p, never upscaled
+SHORT_RES = ((720, 1280), (1080, 1920))  # 9:16   # the preview artifact holds ~1-3 MB mp4s; keep the sheet well under that
 
 
 def _log(msg):
@@ -26,11 +30,50 @@ def _log(msg):
 
 
 def _freeze_min_s():
+    """freezedetect window: the style guide's max_static_s, but never longer than the 3.5 s hard limit."""
     try:
         from src import style
-        return float(style.long_rules()["pacing"]["max_static_s"])
+        return min(HARD_STATIC_S, float(style.long_rules()["pacing"]["max_static_s"]))
     except Exception:  # noqa: BLE001
-        return 6.0
+        return HARD_STATIC_S
+
+
+def _size(path):
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                          "stream=width,height", "-of", "csv=p=0:s=x", str(path)],
+                         capture_output=True, text=True, timeout=60).stdout.strip()
+    try:
+        w, h = (int(v) for v in out.split("x")[:2])
+        return w, h
+    except ValueError:
+        return None, None
+
+
+def resolution_problem(label, width, height):
+    """'' when the render is 720p-1080p in the right orientation, else what is wrong."""
+    if not width or not height:
+        return ""
+    (lo_w, lo_h), (hi_w, hi_h) = SHORT_RES if label == "short" else LONG_RES
+    if not (lo_w <= width <= hi_w and lo_h <= height <= hi_h):
+        return (f"{label}: resolution {width}x{height} is outside {lo_w}x{lo_h}-{hi_w}x{hi_h}")
+    return ""
+
+
+def hard_failures(report, relevance=None):
+    """Owner-rule failures that make the draft "needs fixes": off-topic script, resolution outside
+    720p-1080p, a static picture longer than 3.5 s."""
+    out = []
+    if isinstance(relevance, dict) and relevance.get("verdict") == "off_topic":
+        out.append("off-topic script: " + "; ".join(relevance.get("reasons") or [])[:300])
+    for label, video in ((report or {}).get("videos") or {}).items():
+        problem = resolution_problem(label, video.get("width"), video.get("height"))
+        if problem:
+            out.append(problem)
+        for f in video.get("freezes") or []:
+            if (f.get("duration") or 0) > HARD_STATIC_S:
+                out.append(f"{label}: picture static for {f['duration']:.1f} s at {f['start']:.1f} s "
+                           f"(limit {HARD_STATIC_S:g} s)")
+    return out
 
 
 def _duration(path):
@@ -98,6 +141,7 @@ def analyze(video_path):
                           "-f", "null", "-"], capture_output=True, text=True, timeout=1800).stderr
     result = parse_log(err, total)
     result["duration"] = round(total, 2)
+    result["width"], result["height"] = _size(video_path)
     return result
 
 
@@ -177,6 +221,8 @@ def run(long_path, short_path, out_dir, extra=None):
         report["warnings"].append(f"contact sheet failed ({str(exc)[:120]})")
     if extra:
         report.update(extra)
+    report["hard_failures"] = hard_failures(report, relevance=(extra or {}).get("script_relevance"))
+    report["verdict"] = "needs_fixes" if report["hard_failures"] else "ok"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "qc.json").write_text(json.dumps(_clean(report), indent=2, default=str), encoding="utf-8")
@@ -184,6 +230,8 @@ def run(long_path, short_path, out_dir, extra=None):
         _log(f"could not write qc.json ({exc})")
     for w in report["warnings"]:
         _log(f"warning: {w}")
+    for w in report["hard_failures"]:
+        _log(f"NEEDS FIXES: {w}")
     if not report["warnings"]:
         _log("no warnings")
     return report

@@ -70,13 +70,14 @@ def test_gemini_prompt_requests_bullets_and_short_fields(monkeypatch):
     class Response:
         text = json.dumps({"long_form_slides": [], "short_form_highlight": "x", "hashtags": "#a"})
 
-    def fake(client, prompt, task_name=""):
+    def fake(client, prompt, task_name="", **_k):
         captured["prompt"] = prompt
         return Response()
 
     monkeypatch.setenv("GOOGLE_API_KEY", "test")
     monkeypatch.setattr(gen, "_generate_text_with_fallback", fake)
     monkeypatch.setattr(gen.genai, "Client", lambda api_key: object())
+    monkeypatch.setenv("DYPOL_TOPIC_CHECK", "0")  # stub scripts have no narration
     gen.generate_lesson_content("Topic")
     for key in ('"bullets"', '"visual_queries"', '"image_prompt"', '"short_hook"', '"short_script"', '"content"'):
         assert key in captured["prompt"]

@@ -204,15 +204,25 @@ def generate_lesson_assets(lesson):
 
     # QC (warnings only): loudness, silences, black / frozen stretches + a contact sheet,
     # written as qc.json and contact.png into output/ (the draft artifact).
-    qc_summary = {"warnings": [], "qc_json": None, "contact": None}
+    script_meta = lesson_content.get("_script_meta") if isinstance(lesson_content.get("_script_meta"), dict) else {}
+    qc_summary = {"warnings": [], "qc_json": None, "contact": None, "hard_failures": []}
     try:
         from src import qc
         qc_report = qc.run(long_video_path, short_video_path, OUTPUT_DIR,
-                           extra={"style_check": long_result.get("style_check"), "sfx": long_result.get("sfx")})
+                           extra={"style_check": long_result.get("style_check"), "sfx": long_result.get("sfx"),
+                                  "script_relevance": script_meta.get("relevance")})
         qc_summary = {"warnings": qc_report.get("warnings", []), "qc_json": "qc.json",
-                      "contact": qc_report.get("contact")}
+                      "contact": qc_report.get("contact"), "hard_failures": qc_report.get("hard_failures", [])}
     except Exception as exc:  # noqa: BLE001 - QC never blocks a draft
         print(f"⚠️ QC skipped: {exc}")
+    # Hard failures (off-topic, resolution, static > 3.5 s) mark the draft "needs fixes" in its result.
+    hard_failures = list(qc_summary.get("hard_failures") or [])
+    relevance = script_meta.get("relevance") or {}
+    if relevance.get("verdict") == "off_topic" and not any(h.startswith("off-topic") for h in hard_failures):
+        hard_failures.insert(0, "off-topic script: " + "; ".join(relevance.get("reasons") or [])[:300])
+    quality = {"verdict": "needs_fixes" if hard_failures else "ok", "hard_failures": hard_failures,
+               "script_model": script_meta.get("model", ""),
+               "topic_check": relevance.get("verdict", "not_run")}
 
     hashtags = lesson_content.get("hashtags", "#AI #Developer #LearnAI")
     long_desc = (
@@ -257,7 +267,9 @@ def generate_lesson_assets(lesson):
     candidate = {
         "job_id": os.environ.get("DYPOL_JOB_ID", ""),
         "lesson_title": lesson["title"],
-        "review_required": visual_review_required,
+        "review_required": visual_review_required or bool(hard_failures),
+        "quality": quality,
+        "needs_fixes": bool(hard_failures),
         "visual_manifest": visual_manifests,
         "judge_status": visual_judge["long"].get("judge_status", "disabled"),
         "visual_judge": visual_judge,

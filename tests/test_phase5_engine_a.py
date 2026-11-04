@@ -293,7 +293,7 @@ def test_rewrite_when_clearly_thin(monkeypatch):
     import src.generator as gen
     calls = []
 
-    def fake(client, prompt, task_name=""):
+    def fake(client, prompt, task_name="", **_k):
         calls.append(task_name)
         return _Resp(json.dumps(_content(200)))
 

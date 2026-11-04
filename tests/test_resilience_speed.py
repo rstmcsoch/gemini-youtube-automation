@@ -140,7 +140,7 @@ def test_failure_category_follows_exception_chain():
 def test_reviewer_feedback_capped_and_injected(monkeypatch):
     captured = {}
 
-    def fake(client, prompt, task_name=""):
+    def fake(client, prompt, task_name="", **_k):
         captured["prompt"] = prompt
         return _Resp(json.dumps({"long_form_slides": []}))
 
@@ -148,6 +148,7 @@ def test_reviewer_feedback_capped_and_injected(monkeypatch):
     monkeypatch.setenv("REVIEWER_FEEDBACK", "Open with the phishing statistic. " + "y" * 4000)
     monkeypatch.setattr(gen, "_generate_text_with_fallback", fake)
     monkeypatch.setattr(gen.genai, "Client", lambda api_key: object())
+    monkeypatch.setenv("DYPOL_TOPIC_CHECK", "0")  # stub scripts have no narration
     gen.generate_lesson_content("Topic")
     prompt = captured["prompt"]
     assert "REVIEWER FEEDBACK" in prompt and "Open with the phishing statistic." in prompt
@@ -159,8 +160,9 @@ def test_no_feedback_block_when_unset(monkeypatch):
     monkeypatch.setenv("GOOGLE_API_KEY", "test")
     monkeypatch.delenv("REVIEWER_FEEDBACK", raising=False)
     monkeypatch.setattr(gen, "_generate_text_with_fallback",
-                        lambda c, p, task_name="": captured.setdefault("p", p) and _Resp("{}"))
+                        lambda c, p, task_name="", **_k: captured.setdefault("p", p) and _Resp("{}"))
     monkeypatch.setattr(gen.genai, "Client", lambda api_key: object())
+    monkeypatch.setenv("DYPOL_TOPIC_CHECK", "0")  # stub scripts have no narration
     gen.generate_lesson_content("Topic")
     assert "REVIEWER FEEDBACK" not in captured["p"]
 

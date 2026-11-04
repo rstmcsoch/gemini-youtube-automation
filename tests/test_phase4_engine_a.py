@@ -189,7 +189,7 @@ def test_depth_rewrite_once_when_thin(monkeypatch):
     import src.generator as gen
     calls = []
 
-    def fake(client, prompt, task_name=""):
+    def fake(client, prompt, task_name="", **_k):
         calls.append(task_name)
         return _Resp(json.dumps(_content(200)))
 
@@ -206,13 +206,14 @@ def test_prompt_asks_for_depth_and_a_structured_short(monkeypatch):
     import src.generator as gen
     captured = {}
 
-    def fake(client, prompt, task_name=""):
+    def fake(client, prompt, task_name="", **_k):
         captured.setdefault("prompt", prompt)
         return _Resp(json.dumps({"long_form_slides": []}))
 
     monkeypatch.setenv("GOOGLE_API_KEY", "test")
     monkeypatch.setattr(gen, "_generate_text_with_fallback", fake)
     monkeypatch.setattr(gen.genai, "Client", lambda api_key: object())
+    monkeypatch.setenv("DYPOL_TOPIC_CHECK", "0")  # stub scripts have no narration
     gen.generate_lesson_content("Topic")
     p = captured["prompt"]
     assert "worked walkthrough" in p and "the catch" in p and str(gen.LONG_MIN_WORDS) in p

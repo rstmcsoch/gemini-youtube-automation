@@ -376,8 +376,12 @@ def record_upload_results(
     run_id: str = "",
     status: str = "uploaded",
     visibility: str = "private",
+    quality: dict | None = None,
 ) -> dict:
     """Persist EVERY uploaded video separately (long-form + Short).
+
+    ``quality`` (drafts): {"verdict": "ok"|"needs_fixes", "hard_failures": [...]} from main.py; it is
+    written as ``needs_fixes`` / ``quality`` so the console can show a draft that failed a hard check.
 
     The result schema keeps a ``videos`` array so the second upload never
     overwrites the first; the legacy single-video fields mirror the primary
@@ -409,6 +413,9 @@ def record_upload_results(
         "video_count": len(vids),
         "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+    if isinstance(quality, dict) and quality:
+        result["quality"] = quality
+        result["needs_fixes"] = quality.get("verdict") == "needs_fixes"
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
@@ -524,7 +531,11 @@ def execute_phase(
     candidate.setdefault("lesson_title", lesson.get("title", ""))
 
     videos, error = [], None
-    if policy.allow_upload:
+    # A draft that failed a hard check is never auto-published, even in full phase.
+    allow_upload = policy.allow_upload and not candidate.get("needs_fixes")
+    if policy.allow_upload and not allow_upload:
+        print("Upload skipped: the draft needs fixes (hard QC failure); saved as a draft only.", flush=True)
+    if allow_upload:
         for asset in candidate.get("assets", []):
             body = build_insert_body(
                 asset.get("title", ""), asset.get("description", ""), asset.get("tags", ""),
@@ -542,15 +553,19 @@ def execute_phase(
             record.setdefault("visibility", policy.visibility)
             videos.append(record)
     else:
-        # draft: persist the approved-candidate files for the later publish run
+        # draft (or a full-phase draft that needs fixes): persist the candidate for a later publish run
         save_candidate(candidate_root, candidate["job_id"], candidate)
 
     result = record_upload_results(
         videos, results_path, job_id=candidate["job_id"], run_id=run_id,
         status="uploaded" if videos and not error else ("partial" if videos else "draft_only"),
         visibility=policy.visibility,
+        quality=candidate.get("quality") if isinstance(candidate.get("quality"), dict) else None,
     )
-    mark_lesson_result(plan, candidate.get("lesson_title", ""), "draft" if not policy.allow_upload else "full", videos)
+    if result.get("needs_fixes"):
+        print("DYPOL_DRAFT_VERDICT=needs_fixes: " + "; ".join(candidate["quality"].get("hard_failures") or []),
+              flush=True)
+    mark_lesson_result(plan, candidate.get("lesson_title", ""), "draft" if not allow_upload else "full", videos)
     if error:
         raise error
     return result

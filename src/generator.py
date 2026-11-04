@@ -97,9 +97,27 @@ def _text_models():
     return list(dict.fromkeys(names))  # stable order, no duplicates
 
 
-def _generate_text_with_fallback(client, prompt, task_name="text generation"):
+LAST_TEXT_MODEL = ""  # the model that answered the most recent _generate_text_with_fallback call
+
+
+class ScriptModelUnavailableError(LLMUnavailableError):
+    """No strong model wrote an on-topic script within the script budget (~10 min). The draft fails
+    clearly instead of shipping a weak-model or off-topic video."""
+
+    failure_category = "llm_unavailable"
+
+
+def _generate_text_with_fallback(client, prompt, task_name="text generation", strong_only=False, delays=None):
+    """Primary model, then each fallback, in rounds with backoff. strong_only=True skips weak models
+    ('*-lite' etc., see src/topic_guard.is_weak_model): used for the script, never a weak-model script."""
+    global LAST_TEXT_MODEL
     models = _text_models()
-    delays = _retry_delays()
+    if strong_only:
+        from src.topic_guard import strong_models
+        models = strong_models(models)
+        if not models:
+            raise LLMUnavailableError(f"{task_name}: no strong text model is configured")
+    delays = _retry_delays() if delays is None else tuple(delays)
     last_error = None
     attempts = 0
     for round_index in range(len(delays) + 1):
@@ -114,6 +132,7 @@ def _generate_text_with_fallback(client, prompt, task_name="text generation"):
                 response = client.models.generate_content(model=model_name, contents=prompt)
                 if not getattr(response, "text", None):
                     raise EmptyLLMResponse(f"Gemini returned an empty response for model {model_name}.")
+                LAST_TEXT_MODEL = model_name
                 if attempts > 1:
                     print(f"✅ {task_name} succeeded with model {model_name} "
                           f"(attempt {attempts}, round {round_index + 1}).", flush=True)
@@ -309,7 +328,59 @@ def narration_words(content):
     return long_words, len(str((content or {}).get("short_script") or "").split())
 
 
-def ensure_depth(client, content, prompt):
+SCRIPT_BACKOFF_S = (30, 60, 90, 120)   # between whole script attempts (the last value repeats)
+SCRIPT_INNER_DELAYS = (10, 30)          # rounds inside one attempt (~45 s with the calls)
+_clock = time.monotonic  # patched in tests
+
+
+def _script_budget_s():
+    try:
+        return max(0.0, float(os.environ.get("DYPOL_SCRIPT_BUDGET_S", "600")))
+    except ValueError:
+        return 600.0
+
+
+def _long_narration(content):
+    if not isinstance(content, dict):
+        return ""
+    slides = content.get("long_form_slides") or []
+    return " ".join([str(content.get("hook") or "")] + [str(s.get("content") or "") for s in slides
+                                                        if isinstance(s, dict)])
+
+
+def _short_narration(content):
+    if not isinstance(content, dict):
+        return ""
+    return str(content.get("short_script") or "")
+
+
+def script_relevance(client, topic, content, judge=True):
+    """Topic relevance of the long narration and the Short (src/topic_guard). A borderline result asks the
+    best available strong model once; with no answer it stays borderline (passes, reported in the draft)."""
+    from src import topic_guard as tg
+    if os.environ.get("DYPOL_TOPIC_CHECK", "1").strip().lower() in ("0", "false", "no", "off"):
+        return {"verdict": "not_checked", "reasons": ["DYPOL_TOPIC_CHECK=0"], "parts": {}}
+    parts = {"long": tg.relevance(topic, _long_narration(content))}
+    if _short_narration(content).strip():
+        parts["short"] = tg.relevance(topic, _short_narration(content))
+    for label, result in list(parts.items()):
+        if judge and client is not None and result["verdict"] == tg.BORDERLINE:
+            text = _long_narration(content) if label == "long" else _short_narration(content)
+            try:
+                reply = _generate_text_with_fallback(client, tg.judge_prompt(topic, text),
+                                                     task_name=f"topic relevance check ({label})",
+                                                     strong_only=True, delays=(5,))
+                parts[label] = tg.apply_judge(result, tg.parse_judge(getattr(reply, "text", "")), LAST_TEXT_MODEL)
+            except Exception as exc:  # noqa: BLE001 - the keyword verdict stands
+                print(f"⚠️ topic relevance model check skipped ({str(exc)[:120]})", flush=True)
+    verdicts = [r["verdict"] for r in parts.values()]
+    verdict = (tg.OFF_TOPIC if tg.OFF_TOPIC in verdicts else tg.BORDERLINE if tg.BORDERLINE in verdicts
+               else tg.ON_TOPIC)
+    reasons = [f"{label}: {why}" for label, r in parts.items() for why in r.get("reasons") or []]
+    return {"verdict": verdict, "reasons": reasons, "parts": parts}
+
+
+def ensure_depth(client, content, prompt, topic=None):
     """One rewrite when the script is too thin for 8-12 min (or the Short for 50-65 s); keeps the longer one."""
     if not isinstance(content, dict) or len(content.get("long_form_slides") or []) < 3:
         return content
@@ -336,9 +407,17 @@ def ensure_depth(client, content, prompt):
         {json.dumps(content)[:24000]}
         """
     try:
-        response = _generate_text_with_fallback(client, ask, task_name="lesson depth rewrite")
+        # Strong models only: on 3 Nov this rewrite fell through to flash-lite. Without a strong model
+        # the first (strong-model) script is kept.
+        response = _generate_text_with_fallback(client, ask, task_name="lesson depth rewrite", strong_only=True)
         better = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
         new_long, new_short = narration_words(better)
+        if topic:
+            from src import topic_guard as tg
+            if (tg.relevance(topic, _long_narration(better))["verdict"] == tg.OFF_TOPIC
+                    and tg.relevance(topic, _long_narration(content))["verdict"] != tg.OFF_TOPIC):
+                print("📏 Rewrite drifted off the topic; keeping the first script")
+                return content
         if new_long > long_words and len(better.get("long_form_slides") or []) >= 3:
             if new_short < short_words:
                 for key in ("short_script", "short", "short_hook"):
@@ -403,15 +482,59 @@ def generate_lesson_content(lesson_title, reviewer_feedback=None):
         from src.shotlist import prompt_rules
         prompt += prompt_rules()
         prompt += reviewer_feedback_block(reviewer_feedback_text(reviewer_feedback))
-        response = _generate_text_with_fallback(client, prompt, task_name='lesson content generation')
-        json_string = response.text.strip().replace("```json", "").replace("```", "")
-        content = json.loads(json_string)
-        content = ensure_depth(client, content, prompt)
+        content = _strong_on_topic_script(client, prompt, lesson_title)
         print("✅ Lesson content generated successfully.")
         return content
     except Exception as e:
         print(f"❌ ERROR: Failed to generate lesson content: {e}")
         raise
+
+
+def _strong_on_topic_script(client, prompt, lesson_title):
+    """The lesson JSON from a STRONG model, checked against the topic.
+
+    Weak fallback models ('*-lite') never write the script. When the strong models are unavailable, or
+    the script is off topic (3 tries at most), it waits with backoff (30, 60, 90, 120 s) for up to
+    $DYPOL_SCRIPT_BUDGET_S (600 s), then raises ScriptModelUnavailableError: the draft fails with
+    "script model unavailable" instead of shipping a weak video."""
+    from src import topic_guard as tg
+    budget = _script_budget_s()
+    deadline = _clock() + budget
+    attempt, off_topic_tries, extra, last_reason = 0, 0, "", ""
+    while True:
+        attempt += 1
+        try:
+            response = _generate_text_with_fallback(client, prompt + extra, task_name='lesson content generation',
+                                                    strong_only=True, delays=SCRIPT_INNER_DELAYS)
+            model = LAST_TEXT_MODEL
+            content = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
+            content = ensure_depth(client, content, prompt, topic=lesson_title)
+            rel = script_relevance(client, lesson_title, content)
+            if rel["verdict"] != tg.OFF_TOPIC:
+                if rel["verdict"] == tg.BORDERLINE:
+                    print(f"⚠️ topic check borderline: {'; '.join(rel['reasons'])[:300]}", flush=True)
+                else:
+                    print(f"🎯 topic check: on topic (model {model})", flush=True)
+                if isinstance(content, dict):
+                    content["_script_meta"] = {"model": model, "attempts": attempt, "relevance": rel}
+                return content
+            off_topic_tries += 1
+            last_reason = "off-topic script (" + "; ".join(rel["reasons"])[:300] + ")"
+            print(f"⚠️ topic check: {last_reason}", flush=True)
+            extra = tg.correction_note(lesson_title, rel)
+            if off_topic_tries >= 3:
+                break
+        except LLMUnavailableError as exc:
+            last_reason = f"strong models unavailable ({str(exc)[:200]})"
+            print(f"⚠️ script: {last_reason}", flush=True)
+        wait = SCRIPT_BACKOFF_S[min(attempt - 1, len(SCRIPT_BACKOFF_S) - 1)]
+        if _clock() + wait + sum(SCRIPT_INNER_DELAYS) + 5 > deadline:   # the next attempt must fit too
+            break
+        print(f"⏳ script: waiting {wait}s before trying again (budget {budget:.0f}s)", flush=True)
+        _sleep(wait)
+    raise ScriptModelUnavailableError(
+        f"{tg.SCRIPT_UNAVAILABLE}: no strong model wrote an on-topic script for '{lesson_title}' "
+        f"after {attempt} attempt(s) within {budget:.0f}s; last problem: {last_reason}")
 
 
 def _safe_rounded_rectangle(draw, box, radius=8, **kwargs):
