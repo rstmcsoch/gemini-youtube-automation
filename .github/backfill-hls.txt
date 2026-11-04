@@ -1,7 +1,5 @@
-# job_id:run_id pairs for backfill-hls (oldest first: earliest artifacts expire first) — rerun 2
-job-mvxufc4f-rm2bvf:41309590821
-job-mvz9m4p4-e9dnv5:41449064320
-job-mvzasxyg-0zuuq9:41453804462
-job-mvzci3w4-w3xfqf:41460875234
-job-mw0qmzeh-urv4l7:41646837309
+# job_id:run_id pairs for backfill-hls (oldest first: earliest artifacts expire first)
+# Done 4 Nov 2026 (run 41828288743): job-mvxufc4f-rm2bvf:41309590821 job-mvz9m4p4-e9dnv5:41449064320
+#   job-mvzasxyg-0zuuq9:41453804462 job-mvzci3w4-w3xfqf:41460875234 job-mw0qmzeh-urv4l7:41646837309
+# Rerun (R2 upload error on first try):
 job-mw0sa3hs-f62p58:41654127216
