@@ -68,7 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: read
+      # write: hands the long video's HLS packaging to the backfill-hls workflow (below)
+      actions: write
 
     steps:
       - name: ⬇️ Checkout repository
@@ -292,10 +293,26 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          DYPOL_HLS: ${{ vars.DYPOL_HLS || '1' }}
+          DYPOL_HLS_LONG: ${{ vars.DYPOL_HLS_LONG || 'async' }}
         run: |
           python -m pip install --quiet --disable-pip-version-check boto3 \
             || { echo "::warning::boto3 install failed; the console will use the GitHub artifacts"; exit 0; }
           python scripts/dypol_r2.py --engine gemini --job-id "$JOB_ID" --root output --work "$RUNNER_TEMP/dypol-r2"
+
+      # The Short is already streamed in small parts (HLS) by the step above. The long video's
+      # HLS stream (~10 min of encoding) is built right after, in its own backfill-hls run, so
+      # this draft is not held up; until it lands the console plays the MP4 review copy.
+      - name: 🎞️ Queue the long video's streaming copy (HLS)
+        if: ${{ success() && inputs.phase != 'publish' && vars.DYPOL_HLS_LONG != 'inline' && vars.DYPOL_HLS != '0' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_ID: ${{ inputs.job_id || github.run_id }}
+        run: |
+          gh workflow run backfill-hls.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+            -f jobs="${JOB_ID}:${GITHUB_RUN_ID}" \
+            || echo "::warning::Could not queue the HLS stream for the long video; the console plays the MP4 review copy"
 
       # Fast console preview: a small 480p H.264 copy (+faststart, so the browser can start
       # playing before the whole file arrives). Stored uncompressed in its own artifact so

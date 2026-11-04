@@ -1,0 +1,50 @@
+name: backfill-hls
+# Builds the HLS stream (+ R2 draft files) for drafts that only exist as GitHub
+# artifacts, so the console can stream them in small parts. Never publishes,
+# approves or deletes anything and never touches YouTube.
+# Run it from Actions → backfill-hls → Run workflow with "job_id:run_id" pairs,
+# or list the pairs in .github/backfill-hls.txt (a push of that file runs it).
+run-name: "backfill-hls (${{ github.event_name }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: 'Space-separated job_id:run_id pairs (blank = .github/backfill-hls.txt)'
+        required: false
+        default: ''
+  push:
+    branches: [dypol-integration]
+    paths: ['.github/backfill-hls.txt']
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: backfill-hls
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install ffmpeg + boto3
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          python -m pip install --quiet --disable-pip-version-check boto3
+      - name: Build HLS streams and upload to R2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JOBS: ${{ inputs.jobs }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: python scripts/dypol_backfill_hls.py --engine gemini --jobs "$JOBS" --jobs-file .github/backfill-hls.txt --work "$RUNNER_TEMP/backfill"
