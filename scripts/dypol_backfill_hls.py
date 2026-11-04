@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -38,9 +39,27 @@ def gh(path, token, raw=False):
     req = urllib.request.Request(f"https://api.github.com{path}", headers={
         "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dypol-backfill-hls"})
+    if raw:
+        # Artifact zips redirect to signed blob storage, which rejects a forwarded
+        # Authorization header (401): resolve the redirect, then fetch it bare.
+        try:
+            with urllib.request.build_opener(_NoRedirect).open(req, timeout=300) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            loc = e.headers.get("Location") if e.code in (301, 302, 303, 307, 308) else None
+            if not loc:
+                raise
+        with urllib.request.urlopen(urllib.request.Request(loc, headers={"User-Agent": "dypol-backfill-hls"}),
+                                    timeout=600) as r:
+            return r.read()
     with urllib.request.urlopen(req, timeout=300) as r:
         data = r.read()
-    return data if raw else json.loads(data)
+    return json.loads(data)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 def pick_artifact(artifacts, job_id):
