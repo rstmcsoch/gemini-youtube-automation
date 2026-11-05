@@ -78,8 +78,33 @@ def update_content_plan(plan):
 
 
 
+DESIGN_PATTERNS_DIR = Path(__file__).resolve().parent / "design-patterns"
+DEFAULT_DESIGN_PATTERN = "elements"
+
+
+def resolve_design_pattern(requested=None, index_path=None):
+    """Design pattern id for this run: $DYPOL_PATTERN (console input -> repo variable), checked
+    against design-patterns/index.json. Unknown or not-yet-ready patterns log one line and
+    fall back to `elements` (the only implemented look)."""
+    if requested is None:
+        requested = os.environ.get("DYPOL_PATTERN", "")
+    requested = str(requested or "").strip() or DEFAULT_DESIGN_PATTERN
+    try:
+        entries = json.loads(Path(index_path or DESIGN_PATTERNS_DIR / "index.json").read_text(encoding="utf-8"))
+        status = {str(e.get("id")): str(e.get("status")) for e in entries if isinstance(e, dict)}
+    except (OSError, ValueError):
+        status = {DEFAULT_DESIGN_PATTERN: "ready"}
+    if status.get(requested) == "ready":
+        return requested
+    reason = "is coming soon" if requested in status else "is unknown"
+    print(f"⚠️ DESIGN_PATTERN_FALLBACK {requested[:60]!r} {reason}; using {DEFAULT_DESIGN_PATTERN}", flush=True)
+    return DEFAULT_DESIGN_PATTERN
+
+
 def generate_lesson_assets(lesson):
     print(f"\n▶️ Starting production for Lesson: '{lesson['title']}'")
+    design_pattern = resolve_design_pattern()
+    print(f"🎨 design pattern: {design_pattern}", flush=True)
     chapter_safe = re.sub(r'[^\w]', '_', str(lesson['chapter'])).strip('_')
     part_safe = re.sub(r'[^\w]', '_', str(lesson['part'])).strip('_')
     unique_id = f"{datetime.datetime.now().strftime('%Y%m%d')}_{chapter_safe}_{part_safe}"
@@ -274,6 +299,10 @@ def generate_lesson_assets(lesson):
     candidate = {
         "job_id": os.environ.get("DYPOL_JOB_ID", ""),
         "lesson_title": lesson["title"],
+        # Narration voice actually used (Kokoro id or blend; validated, am_michael on fallback).
+        "voice": __import__("src.voice", fromlist=["last_meta"]).last_meta().get("voice")
+        or os.environ.get("DYPOL_VOICE", "") or "am_michael",
+        "design_pattern": design_pattern,
         "review_required": visual_review_required or bool(hard_failures),
         "quality": quality,
         "needs_fixes": bool(hard_failures),

@@ -22,11 +22,10 @@ on:
         required: false
         default: 'en'
       privacy:
-        description: 'YouTube visibility; keep private for initial testing'
-        required: true
-        default: 'private'
-        type: choice
-        options: [private, unlisted, public]
+        description: 'Legacy YouTube visibility; privacy_status takes precedence (empty = unlisted)'
+        required: false
+        default: ''
+        type: string
       job_id:
         description: 'Stable DYPOL job ID used to connect draft and publish'
         required: false
@@ -53,6 +52,21 @@ on:
         default: ''
       reviewer_feedback:
         description: 'Reviewer notes from a rejected attempt (redo); max 1500 chars are used'
+        required: false
+        default: ''
+        type: string
+      voice:
+        description: 'Kokoro voice id (am_michael) or blend "am_michael:0.6,am_adam:0.4"; empty = repo default'
+        required: false
+        default: ''
+        type: string
+      design_pattern:
+        description: 'Design pattern id from design-patterns/index.json; empty = repo default (elements)'
+        required: false
+        default: ''
+        type: string
+      privacy_status:
+        description: 'YouTube visibility for upload: private | unlisted | public (empty = unlisted)'
         required: false
         default: ''
         type: string
@@ -251,7 +265,10 @@ jobs:
           DYPOL_AUTO_PUBLISH: ${{ inputs.auto_publish || '0' }}
           DYPOL_TITLE_OVERRIDE: ${{ inputs.title_override || '' }}
           DYPOL_DESCRIPTION_OVERRIDE: ${{ inputs.description_override || '' }}
-          YOUTUBE_PRIVACY_STATUS: ${{ inputs.privacy || 'private' }}
+          YOUTUBE_PRIVACY_STATUS: ${{ inputs.privacy_status || inputs.privacy || 'unlisted' }}
+          # Voice / design pattern: dispatch input -> repo Actions variable -> built-in default.
+          DYPOL_VOICE: ${{ inputs.voice || vars.DYPOL_DEFAULT_VOICE || 'am_michael' }}
+          DYPOL_PATTERN: ${{ inputs.design_pattern || vars.DYPOL_DEFAULT_PATTERN || 'elements' }}
           REVIEWER_FEEDBACK: ${{ inputs.reviewer_feedback || '' }}
           # Unbuffered output: per-stage timings in the log line up with real time.
           PYTHONUNBUFFERED: '1'
