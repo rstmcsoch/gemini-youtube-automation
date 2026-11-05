@@ -20,15 +20,18 @@ def rules():
             "card": (float(card[0]), float(card[1]))}
 
 
+CUT_LEAD = 0.04   # s: a cut may lead the next word's onset by up to one frame-ish
+
+
 def cut_candidates(words, duration):
     """[(time, strength)] between words: 2 = sentence end, 1 = clause break, 0 = plain word gap.
 
-    The cut sits in the gap between one word's end and the next word's start (just
-    before the next word), so a new picture arrives with the new phrase."""
+    The cut lands on the next word's start (CUT_LEAD earlier when the gap allows), so a new
+    picture arrives with the new phrase; with Kokoro word timings that start is exact."""
     out = []
     words = [(str(w), float(a), float(b)) for w, a, b in (words or [])]
     for (w, a, b), (_, na, _) in zip(words, words[1:]):
-        t = b + max(0.0, na - b) * 0.7
+        t = max(min(b, na), na - CUT_LEAD)
         if not 0.0 < t < duration:
             continue
         strength = 2 if w.endswith(_SENTENCE) else (1 if w.endswith(_CLAUSE) or w in ("-", "—") else 0)

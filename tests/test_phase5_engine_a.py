@@ -264,7 +264,7 @@ def test_requirements_and_workflow_carry_the_voice():
     root = Path(__file__).resolve().parent.parent
     assert "kokoro-onnx" in (root / "requirements.txt").read_text()
     wf = (root / ".github/workflows/main.yml").read_text()
-    assert "~/.cache/kokoro-onnx" in wf and "kokoro-onnx-model-files-v1.0" in wf
+    assert "~/.cache/kokoro-onnx" in wf and "kokoro-onnx-model-files-v2" in wf
 
 
 # ------------------------------------------------------------------ script depth

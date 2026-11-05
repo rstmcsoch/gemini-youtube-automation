@@ -119,14 +119,19 @@ def trim_silence(path, out_path, keep_ms=60, threshold_db=-40):
     seg = AudioSegment.from_file(str(path))
     lead = max(0, detect_leading_silence(seg, silence_threshold=threshold_db) - keep_ms)
     tail = max(0, detect_leading_silence(seg.reverse(), silence_threshold=threshold_db) - keep_ms * 3)
-    trimmed = seg[lead: len(seg) - tail] if len(seg) - tail > lead + 200 else seg
+    cut = len(seg) - tail > lead + 200
+    trimmed = seg[lead: len(seg) - tail] if cut else seg
     trimmed.export(str(out_path), format="wav")
+    from src import voice
+    voice.carry_word_timings(path, out_path, shift=-(lead / 1000.0) if cut else 0.0)
     return Path(out_path)
 
 
 def change_tempo(path, out_path, factor):
     subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(path), "-af",
                     f"atempo={factor:.4f}", str(out_path)], check=True)
+    from src import voice
+    voice.carry_word_timings(path, out_path, scale=float(f"{factor:.4f}"))
     return Path(out_path)
 
 

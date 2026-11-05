@@ -814,6 +814,27 @@ def _finish(words, ass_path, size, mode):
     return vf, burned
 
 
+def narration_word_timings(text, path, speech=None):
+    """([(word, start, end)], source) for one narration clip. The Kokoro timestamped model's
+    word timings (src/voice.py sidecar, exact to the audio) when they exist for this text;
+    else storyboard.estimate_word_timings (silence-region guess, ~0.2-0.3 s off)."""
+    from src import voice
+    speech = ex.audio_duration(path) if speech is None else speech
+    words = voice.load_word_timings(path, text, speech)
+    if words:
+        return words, "kokoro"
+    return sb.estimate_word_timings(text, speech, ex.detect_speech_regions(path, speech)), "estimate"
+
+
+def _log_timing_sources(label, sources):
+    est = sum(1 for s in sources if s != "kokoro")
+    if est:
+        _log(f"{label}: WORD_TIMING_FALLBACK {est}/{len(sources)} clip(s) have no Kokoro word timings; "
+             f"using estimate_word_timings (approximate)")
+    else:
+        _log(f"{label}: word timings from Kokoro phoneme durations ({len(sources)} clip(s))")
+
+
 def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesson_terms=(), video_title=None):
     """slides: normalized slide specs (title, content, bullets, visual_queries, image_prompt, kicker)."""
     video_title = video_title or (slides[0].get("title", "") if slides else "")
@@ -823,11 +844,12 @@ def produce_long(slides, narration_paths, out_dir, out_path, gather, used, lesso
     narration = out_dir / "narration_long.wav"
     durations = ex.build_narration(narration_paths, [SLIDE_PAD] * len(narration_paths), narration)
     # Word timings first: cuts land on narration clause boundaries (variable 2-4 s shots).
-    slide_words = []
+    slide_words, sources = [], []
     for slide, path in zip(slides, narration_paths):
-        speech = ex.audio_duration(path)
-        slide_words.append(sb.estimate_word_timings(slide.get("content", ""), speech,
-                                                    ex.detect_speech_regions(path, speech)))
+        words, source = narration_word_timings(slide.get("content", ""), path)
+        slide_words.append(words)
+        sources.append(source)
+    _log_timing_sources("long", sources)
     timeline = pacing.build_timeline(durations, slide_words, [opens_on_chapter(s) for s in slides])
     gaps = sb.coverage_gaps(timeline)
     if gaps:
@@ -1036,8 +1058,9 @@ def plan_short(timeline, words, sections, number=None, photos=(), out_dir=None, 
         bounds.append((k, k + cnt))
         k += cnt
     def sec_of_time(t):
+        # A section runs until the next section's first word starts (word starts drive cues).
         for si, (a, b) in enumerate(bounds):
-            if a < len(words) and words[min(b, len(words)) - 1][2] >= t:
+            if a < len(words) and (b >= len(words) or t < words[b][1]):
                 return si
         return len(sections) - 1
     shot_sec = [sec_of_time((s["start"] + s["end"]) / 2) for s in shots]
@@ -1100,8 +1123,8 @@ def plan_short(timeline, words, sections, number=None, photos=(), out_dir=None, 
         at = _find_number(words, number.get("value"))
         g = 0
         if at is not None:
-            t = (words[at][1] + words[at][2]) / 2
-            g = next((i for i, s in enumerate(shots) if s["start"] <= t < s["end"]), 0)
+            t = words[at][1]            # the shot on screen when the number starts being spoken
+            g = next((i for i, s in enumerate(shots) if s["start"] - 1e-6 <= t < s["end"]), 0)
         old = plan[g]
         if old and old[2]:
             for m in range(n):          # the unit it replaces shrinks to its other shots
@@ -1174,7 +1197,8 @@ def produce_short(script, voice_path, out_dir, out_path, gather, used, spec, own
     speech = ex.audio_duration(voice_path)
     durations = ex.build_narration([voice_path], [0.6], narration)
     total = durations[0]
-    words = sb.estimate_word_timings(script, speech, ex.detect_speech_regions(voice_path, speech))
+    words, source = narration_word_timings(script, voice_path, speech)
+    _log_timing_sources("short", [source])
     timeline = pacing.build_timeline([total], [words], [False])
     if sb.coverage_gaps(timeline):
         raise RuntimeError("Short timeline has uncovered frames")

@@ -10,7 +10,7 @@ voice:
   voice: am_michael                # Kokoro-82M American male (Apache-2.0, local CPU)
   speed: 1.2                       # starting speed (technical scripts run ~135 WPM at 1.08); tuned per run toward wpm_target
   lang: en-us
-  model_file: kokoro-v1.0.onnx     # kokoro-v1.0.int8.onnx is ~2.5x faster, same voice, quantised
+  model_file: kokoro-v1.0-timestamped.onnx  # same audio as kokoro-v1.0.onnx + phoneme durations (exact word timings)
   wpm_min: 150
   wpm_max: 165
   wpm_target: 157
