@@ -784,21 +784,19 @@ def style_report(kinds, fixed, timeline=None):
 
 
 def _sound_design(timeline, kinds, fixed, narration, out_dir, label="long"):
-    """SFX track (whoosh/pop on block changes, clicks while code types); (None, summary) on any failure."""
+    """SFX track (soft procedural chime / whoosh / swell on block changes); (None, summary) on any failure."""
     try:
         from src import sfx
-        if not sfx.available():
-            return None, {"enabled": False, "reason": "sfx files missing"}
         events = sfx.plan(timeline, kinds, fixed, seed=len(timeline["shots"]))
         path = sfx.build_track(events, timeline["total"], Path(out_dir) / f"sfx_{label}.wav", narration)
-        hits = [e for e in events if not e.get("click")]
-        summary = {"enabled": bool(path), "hits": len(hits), "clicks": len(events) - len(hits),
+        summary = {"enabled": bool(path), "hits": len(events),
                    "hits_per_min": sfx.per_minute(events, timeline["total"]),
-                   "clips": sorted({e["clip"] for e in hits}), "license": "CC0 1.0 (Kenney), see sfx/LICENSES.md"}
+                   "under_voice_db": sfx.audio_rules()["under_db"],
+                   "clips": sorted({e["clip"] for e in events}), "license": "procedural (generated in src/sfx.py)"}
         _log(f"{label}: sfx {json.dumps(summary)}")
         return path, summary
     except Exception as exc:  # noqa: BLE001 - sound design never blocks a render
-        _log(f"long: sfx skipped ({exc})")
+        _log(f"{label}: sfx skipped ({exc})")
         return None, {"enabled": False, "reason": str(exc)[:200]}
 
 

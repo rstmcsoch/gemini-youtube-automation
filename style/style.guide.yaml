@@ -96,17 +96,18 @@ look:
   motion:
     easing: ease_in_out_cubic
   captions:
-    # Word-level ASS karaoke, burned in: the spoken word turns lime.
+    # Burned-in caption lines: plain white with outline; only numbers/years/percentages and at most
+    # one key term per sentence turn lime. Long: above the lower-third bottom band; Short: ~75 % height
+    # (inside the Shorts safe zone, clear of the bottom ~20 % UI).
     font_file: assets/fonts/dypol/SpaceGrotesk-Bold.ttf   # static 700 instance of the OFL variable font
     family: Space Grotesk
-    long: {max_words: 6, max_chars: 40, size_px: 56, center_y: 0.885}
-    short: {min_words: 2, max_words: 4, max_chars: 22, size_px: 100, center_y: 0.63}
+    long: {max_words: 6, max_chars: 40, size_px: 56, center_y: 0.78}
+    short: {min_words: 2, max_words: 4, max_chars: 22, size_px: 100, center_y: 0.75}
   grade:
     # ffmpeg filters on the encoder (runs per render chunk). vignette dither=0: the grain
     # that follows already dithers, and vignette's own dither roughly doubled its cost.
     filters: "format=yuv420p,eq=contrast=1.06:saturation=1.04,vignette=angle=0.38:dither=0,noise=alls=2:allf=t"
   audio:
-    sfx_under_voice_db: 12         # whooshes / pops sit ~12 dB under the narration
-    clicks_under_voice_db: 22
+    sfx_under_voice_db: 20         # soft procedural chime / whoosh / swell, >= 18 dB under the narration (src/sfx.py)
     sfx_per_min: [4, 8]
     target_lufs: -14

@@ -128,17 +128,19 @@ def test_no_orphan_word_after_a_full_line():
     assert len(groups[1]) >= 2
 
 
-def test_ass_has_one_event_per_word_with_lime_active_word():
+def test_ass_one_event_per_line_with_only_key_words_lime():
     words = sb.estimate_word_timings("Seventy percent of developers now use AI tools.", 4.0)
     text = caps.words_to_ass(words, (1920, 1080), "long")
     events = [line for line in text.splitlines() if line.startswith("Dialogue:")]
-    assert len(events) == len(words)
+    groups = caps.karaoke_groups(words, 6, 40, 1)
+    assert len(events) == len(groups)
     assert "Style: Cap,Space Grotesk," in text and "PlayResY: 1080" in text
+    assert "&H00FFFFFF" in text                                         # plain white body
     lime = "&H0060F5C8"       # #C8F560 in ASS BGR order
-    assert all(line.count(lime) == 1 for line in events)
-    assert all("\\pos(960,955)" in line for line in events)          # lower third
+    assert sum(line.count(lime) for line in events) == 3                # Seventy, percent + AI
+    assert all("\\pos(960,842)" in line for line in events)            # 0.78 of 1080
     short = caps.words_to_ass(words, (1080, 1920), "short")
-    assert "\\pos(540,1209)" in short                                  # ~63 % of the height
+    assert "\\pos(540,1440)" in short                                   # 0.75 of 1920
 
 
 def test_srt_upload_file_unchanged_by_karaoke():
@@ -153,12 +155,13 @@ def test_vendored_caption_font_exists():
 
 # ------------------------------------------------------------------ 4. SFX
 
-def test_sfx_files_vendored_with_licence():
-    licence = (REPO / "sfx/LICENSES.md").read_text()
-    assert "CC0" in licence
+def test_sfx_is_procedural_no_vendored_files():
+    assert sfx.available()
+    assert not any("pop" in c or "click" in c or "squish" in c for c in sfx.CLIPS)
+    assert not (REPO / "sfx").exists() or not list((REPO / "sfx").glob("*.ogg"))
     for clip in sfx.CLIPS:
-        assert sfx.clip_path(clip).exists(), clip
-        assert f"{clip}.ogg" in licence
+        y = sfx.synth(clip)
+        assert len(y) > 1000 and abs(float(abs(y).max()) - 1.0) < 1e-6
 
 
 def _changes(total, step=3.0):
@@ -177,44 +180,41 @@ def test_transition_hits_4_to_8_per_minute_and_varied():
     clips = [e["clip"] for e in events]
     assert all(a != b for a, b in zip(clips, clips[1:]))
     assert len(set(clips)) >= 4
-    whoosh = next(e for e in events if e["clip"] in ("whoosh_01", "whoosh_03"))
-    assert whoosh["t"] == pytest.approx(whoosh["cut"] - 0.52, abs=0.01)   # peak lands on the cut
+    whoosh = next(e for e in events if e["clip"].startswith("whoosh_soft"))
+    assert whoosh["t"] == pytest.approx(whoosh["cut"] - 0.45, abs=0.01)   # peak lands on the cut
 
 
-def test_clicks_follow_code_typing(tmp_path):
-    tl = sb.build_timeline([8.0], 4.0)
-    windows = ex.shot_windows(tl)
-    from src import blocks
-    span = windows[1][1] - windows[0][0]
-    base = dict(blocks.block_asset({"kind": "code_panel", "code": "x = 1\nprint(x)"}), block_id="b", block_span=span)
-    fixed = {0: dict(base, block_offset=0.0), 1: dict(base, block_offset=windows[1][0] - windows[0][0])}
-    typing = sfx.code_typing_windows(tl, fixed)
-    assert len(typing) == 1
-    a, b = typing[0]
-    clicks = sfx.plan_clicks(typing, seed=1)
-    assert clicks and all(a <= c["t"] < b for c in clicks)
-    assert all(c["clip"].startswith("click_") for c in clicks)
+def test_no_keyboard_clicks_in_plan():
+    tl = sb.build_timeline([8.0, 8.0], 4.0)
+    kinds = ["diagram"] * len(tl["shots"])
+    events = sfx.plan(tl, kinds, {}, seed=1)
+    assert all(not e.get("click") and e["clip"] in sfx.CLIPS for e in events)
 
 
-def test_sfx_track_sits_about_12_db_under_voice(tmp_path):
+def test_sfx_track_sits_at_least_18_db_under_voice(tmp_path):
+    import numpy as np
     from pydub import AudioSegment
     voice = _tone(tmp_path / "v.wav", 6.0)
-    events = [{"t": 1.0, "clip": "pop_01", "gain_db": 0.0}, {"t": 3.0, "clip": "whoosh_02", "gain_db": 0.0}]
+    events = [{"t": 1.0, "clip": "chime_soft_01", "gain_db": 0.0}, {"t": 3.0, "clip": "whoosh_soft_02", "gain_db": 0.0}]
     out = sfx.build_track(events, 6.0, tmp_path / "s.wav", voice)
     seg, v = AudioSegment.from_file(str(out)), AudioSegment.from_file(str(voice))
     assert abs(len(seg) - 6000) < 30
-    hit = seg[1000:1000 + 150]
-    assert v.dBFS - 16 <= hit.dBFS <= v.dBFS - 8
+    data = np.array(seg.get_array_of_samples(), dtype=np.float64).reshape(-1, 2)
+    loudest = sfx.loudest_window_db(data)
+    assert loudest <= v.dBFS - 18 + 0.5
+    assert sfx.audio_rules()["under_db"] >= 18
 
 
 def test_mix_with_sfx_and_ducked_music_hits_minus_14(tmp_path):
     voice = _tone(tmp_path / "v.wav", 6.0)
     music = _tone(tmp_path / "m.wav", 3.0)
-    track = sfx.build_track([{"t": 2.0, "clip": "pop_02", "gain_db": 0.0}], 6.0, tmp_path / "s.wav", voice)
+    track = sfx.build_track([{"t": 2.0, "clip": "swell_soft_01", "gain_db": 0.0}], 6.0, tmp_path / "s.wav", voice)
     out = ex.mix_music_and_normalize(voice, tmp_path / "o.wav", music_path=music, music_db=-26, sfx_path=track)
     assert ex.measure_lufs(out) == pytest.approx(-14.0, abs=1.0)
+    assert ex.measure_true_peak(out) <= -1.0
     graph = ex.mix_graph(6.0, music=True, sfx=True)
-    assert "sidechaincompress" in graph and "amix=inputs=3" in graph
+    assert graph.count("sidechaincompress") == 2 and "amix=inputs=3" in graph   # music AND sfx ducked
+    assert "[s0][ks]sidechaincompress" in graph and "asplit=3" in graph
 
 
 # ------------------------------------------------------------------ 5. grade + burn-in in the encoder

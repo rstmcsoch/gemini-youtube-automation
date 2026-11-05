@@ -148,25 +148,32 @@ def build_narration(segment_paths, pads, out_wav, min_total=None):
 
 
 DUCK = "sidechaincompress=threshold=0.04:ratio=5:attack=40:release=450:makeup=1"
+# SFX ducking under speech: faster attack so a soft hit that overlaps a word dips out of its way.
+SFX_DUCK = "sidechaincompress=threshold=0.03:ratio=6:attack=15:release=350:makeup=1"
 
 
 def mix_graph(total, music=False, sfx=False, music_db=-26, duck=True):
     """filter_complex for narration [0] + optional music bed [1] + optional SFX track [last].
 
-    The music sits at music_db and is additionally ducked under the voice (sidechain); the
-    SFX track is pre-levelled ~12 dB under the voice by src/sfx.py."""
+    The music sits at music_db; the SFX track is pre-levelled >= 18-20 dB under the voice by
+    src/sfx.py. Both are additionally ducked under the voice (sidechaincompress keyed on the
+    narration), so neither competes with speech."""
     fmt = "aformat=sample_rates=48000:channel_layouts=stereo"
     parts, labels = [], ["[v]"]
-    key = music and duck
-    parts.append(f"[0:a]{fmt}" + (",asplit=2[v][key]" if key else "[v]"))
+    keys = [k for k, on in (("[km]", music), ("[ks]", sfx)) if on and duck]
+    parts.append(f"[0:a]{fmt}" + (f",asplit={len(keys) + 1}[v]{''.join(keys)}" if keys else "[v]"))
     if music:
+        key = "[km]" in keys
         parts.append(f"[1:a]volume={music_db}dB,{fmt},afade=t=in:d=1.5,"
                      f"afade=t=out:st={max(0.0, total - 2.0):.3f}:d=2" + ("[m0]" if key else "[m]"))
         if key:
-            parts.append(f"[m0][key]{DUCK}[m]")
+            parts.append(f"[m0][km]{DUCK}[m]")
         labels.append("[m]")
     if sfx:
-        parts.append(f"[{2 if music else 1}:a]{fmt}[s]")
+        key = "[ks]" in keys
+        parts.append(f"[{2 if music else 1}:a]{fmt}" + ("[s0]" if key else "[s]"))
+        if key:
+            parts.append(f"[s0][ks]{SFX_DUCK}[s]")
         labels.append("[s]")
     parts.append(f"{''.join(labels)}amix=inputs={len(labels)}:duration=first:normalize=0[a]")
     return ";".join(parts)
@@ -748,8 +755,8 @@ def long_overlay(timeline, slides, bullet_times, size, hide_windows=(), captions
     """Lower-third panel per slide; bullets fade/slide in at their narration times.
 
     `hide_windows` are (start, end) spans drawn by block renderers: they carry their own
-    text, so the lower third fades out over them. With burned-in `captions` the panel sits
-    higher so the caption line in the lower third stays clear.
+    text, so the lower third fades out over them. With burned-in `captions` the panel's lower
+    edge sits just above the caption line (captions.panel_bottom_frac), so they never overlap.
     """
     bug, bug_xy = render_bug(size, right=True)
     hide_windows = sorted(hide_windows or ())
@@ -760,7 +767,9 @@ def long_overlay(timeline, slides, bullet_times, size, hide_windows=(), captions
             if a - 0.3 <= t <= b + 0.3:
                 h = max(h, min(_ease((t - (a - 0.3)) / 0.3), _ease(((b + 0.3) - t) / 0.3)))
         return h
-    prepared = [render_lower_third(s, size, bottom=0.17 if captions else 0.06) for s in slides]
+    from src import captions as caps
+    bottom = caps.panel_bottom_frac(size) if captions else 0.06   # panel clears the caption line
+    prepared = [render_lower_third(s, size, bottom=bottom) for s in slides]
     shift = int(36 * size[1] / 1080)
 
     def apply(frame, t):
