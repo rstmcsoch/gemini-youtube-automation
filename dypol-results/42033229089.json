@@ -1,0 +1,19 @@
+{
+  "job_id": "job-mw3kb1q7-pimzef",
+  "run_id": "42033229089",
+  "status": "draft_only",
+  "visibility": "unlisted",
+  "videos": [],
+  "youtube_id": "",
+  "youtube_url": "",
+  "video_count": 0,
+  "recorded_at": "2026-11-05T13:34:16.812272+00:00",
+  "quality": {
+    "verdict": "ok",
+    "hard_failures": [],
+    "script_model": "gemini-3.6-flash",
+    "topic_check": "on_topic",
+    "short_hook": "number"
+  },
+  "needs_fixes": false
+}
