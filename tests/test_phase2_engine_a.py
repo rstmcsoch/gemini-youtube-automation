@@ -170,18 +170,17 @@ def _changes(total, step=3.0):
         [step * i for i in range(1, int(total / step))])]
 
 
-def test_transition_hits_4_to_8_per_minute_and_varied():
+def test_transition_cues_sparse_calm_and_varied():
     total = 240.0
     events = sfx.plan_transitions(_changes(total), total, seed=3)
-    rate = len(events) / (total / 60)
-    assert 4.0 <= rate <= 8.0, rate
+    assert 0 < len(events) / (total / 60) <= 8.0
     cuts = [e["cut"] for e in events]
     assert all(b - a >= 7.5 - 1e-6 for a, b in zip(cuts, cuts[1:]))
     clips = [e["clip"] for e in events]
     assert all(a != b for a, b in zip(clips, clips[1:]))
-    assert len(set(clips)) >= 4
-    whoosh = next(e for e in events if e["clip"].startswith("whoosh_soft"))
-    assert whoosh["t"] == pytest.approx(whoosh["cut"] - 0.45, abs=0.01)   # peak lands on the cut
+    assert all(c.startswith("chime_soft") for c in clips)     # only kinetic_text / count_up cues here
+    chime = events[0]
+    assert chime["t"] == pytest.approx(chime["cut"] - 0.08, abs=0.01)   # peak lands on the cut
 
 
 def test_no_keyboard_clicks_in_plan():
@@ -191,18 +190,16 @@ def test_no_keyboard_clicks_in_plan():
     assert all(not e.get("click") and e["clip"] in sfx.CLIPS for e in events)
 
 
-def test_sfx_track_sits_at_least_18_db_under_voice(tmp_path):
-    import numpy as np
+def test_sfx_track_sits_at_least_22_lu_under_voice(tmp_path):
     from pydub import AudioSegment
     voice = _tone(tmp_path / "v.wav", 6.0)
-    events = [{"t": 1.0, "clip": "chime_soft_01", "gain_db": 0.0}, {"t": 3.0, "clip": "whoosh_soft_02", "gain_db": 0.0}]
+    events = [{"t": 1.0, "clip": "chime_soft_01", "gain_db": 0.0}, {"t": 3.0, "clip": "swell_soft_02", "gain_db": 0.0}]
     out = sfx.build_track(events, 6.0, tmp_path / "s.wav", voice)
-    seg, v = AudioSegment.from_file(str(out)), AudioSegment.from_file(str(voice))
+    seg = AudioSegment.from_file(str(out))
     assert abs(len(seg) - 6000) < 30
-    data = np.array(seg.get_array_of_samples(), dtype=np.float64).reshape(-1, 2)
-    loudest = sfx.loudest_window_db(data)
-    assert loudest <= v.dBFS - 18 + 0.5
-    assert sfx.audio_rules()["under_db"] >= 18
+    gap = ex.measure_lufs(voice) - ex.measure_lufs(out)
+    assert gap >= 22.0, gap
+    assert sfx.audio_rules()["under_db"] >= 24
 
 
 def test_mix_with_sfx_and_ducked_music_hits_minus_14(tmp_path):

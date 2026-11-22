@@ -1,63 +1,58 @@
-"""Sound design for Engine A: soft, calm transitions generated in code (numpy).
+"""Sound design for Engine A: calm, sparse cues generated in code (numpy).
 
 No third-party audio files: every sound is synthesised here, so licensing is clean.
 
-* chime  - soft sine chime (fundamental + quiet fifth/octave), slow attack and long decay.
-* whoosh - band-passed noise with a slow swell-and-fade envelope (a breath, not a swish).
-* swell  - gentle pad of detuned sines rising over ~1.2 s, for chapter cards.
+* chime - soft low sine chime (fundamental + quiet fifth/octave, all <= 1.5 kHz), 60 ms attack.
+* swell - low pad of detuned sines rising over ~1.1 s, for chapter cards.
 
-Hits land on block changes, varied, ~4-8 per minute (never closer than 60/8 s). The track is
-levelled so each hit's loudest 150 ms sits >= 18-20 dB under the narration (audio.sfx_under_voice_db),
-then the mixer ducks it (and the music) under speech and limits the final file to <= -1 dBTP.
-Planning is pure (testable); only `build_track` touches audio.
+No noise sweeps of any kind, nothing for code panels / diagrams / stills, nothing for code typing.
+At most one cue per section (a script slide, or a chapter card), never closer than 7.5 s.
+Each cue is levelled by integrated loudness (ITU-R BS.1770, K-weighted, gated) to sit
+`under_db` (>= 24 dB) below the narration's integrated LUFS; the mixer then ducks it under speech.
+DYPOL_SFX=off disables cues entirely. Planning is pure (testable); only `build_track` touches audio.
 """
+import os
 import random
 from pathlib import Path
 
 from src import style
 
 RATE = 48000
-MIN_UNDER_VOICE_DB = 18.0
+MIN_UNDER_VOICE_DB = 24.0
+MAX_FREQ_HZ = 1500.0
+MIN_ATTACK_S = 0.02
 
 # peak_s: where the clip's energy peaks, so the peak lands on the cut.
 CLIPS = {
     "chime_soft_01": {"category": "chime", "peak_s": 0.08, "freq": 523.25, "dur": 1.6},
     "chime_soft_02": {"category": "chime", "peak_s": 0.08, "freq": 587.33, "dur": 1.6},
     "chime_soft_03": {"category": "chime", "peak_s": 0.08, "freq": 659.25, "dur": 1.6},
-    "whoosh_soft_01": {"category": "whoosh", "peak_s": 0.45, "band": (300.0, 1800.0), "dur": 0.9},
-    "whoosh_soft_02": {"category": "whoosh", "peak_s": 0.45, "band": (200.0, 1200.0), "dur": 0.9},
-    "whoosh_soft_03": {"category": "whoosh", "peak_s": 0.45, "band": (400.0, 2400.0), "dur": 0.9},
     "swell_soft_01": {"category": "swell", "peak_s": 1.1, "freq": 261.63, "dur": 1.6},
     "swell_soft_02": {"category": "swell", "peak_s": 1.1, "freq": 293.66, "dur": 1.6},
 }
 
-WHOOSH_KINDS = {"code_panel", "diagram", "stock_or_ai_still"}
-CHIME_KINDS = {"kinetic_text", "count_up"}
-SWELL_KINDS = {"chapter_card"}
+# Only these visual kinds earn a cue; everything else (code panels, diagrams, stills...) stays silent.
+CUE_FOR_KIND = {"chapter_card": "swell", "kinetic_text": "chime", "count_up": "chime"}
+
+
+def enabled():
+    return os.environ.get("DYPOL_SFX", "").strip().lower() not in {"off", "0", "false", "no", "none"}
 
 
 def audio_rules():
     a = style.look().get("audio") or {}
     rate = a.get("sfx_per_min") or [4, 8]
-    under = max(MIN_UNDER_VOICE_DB, float(a.get("sfx_under_voice_db", 20)))
+    under = max(MIN_UNDER_VOICE_DB, float(a.get("sfx_under_voice_db", MIN_UNDER_VOICE_DB)))
     return {"under_db": under, "min_per_min": float(rate[0]), "max_per_min": float(rate[1])}
 
 
 def available():
-    """Procedural: always available (needs only numpy)."""
-    return True
+    """Procedural: always available (needs only numpy) unless switched off with DYPOL_SFX=off."""
+    return enabled()
 
 
 def _by_category(cat):
     return [c for c, v in CLIPS.items() if v["category"] == cat]
-
-
-def _category_for(kind):
-    if kind in SWELL_KINDS:
-        return "swell"
-    if kind in CHIME_KINDS:
-        return "chime"
-    return "whoosh"
 
 
 # ------------------------------------------------------------------ synthesis
@@ -94,16 +89,8 @@ def synth(clip_id, rate=RATE):
         rise = np.clip(t / spec["peak_s"], 0, 1) ** 2.2             # gentle swell up to the cut
         fall = np.where(t > spec["peak_s"], np.exp(-(t - spec["peak_s"]) / 0.18), 1.0)
         y = tone * rise * fall
-    else:  # whoosh: band-passed noise, smooth bell envelope
-        rng = np.random.default_rng(sum(map(ord, clip_id)))
-        noise = rng.standard_normal(n)
-        spectrum = np.fft.rfft(noise)
-        freqs = np.fft.rfftfreq(n, 1.0 / rate)
-        lo, hi = spec["band"]
-        band = np.exp(-0.5 * (np.log(np.maximum(freqs, 1.0) / np.sqrt(lo * hi)) / (np.log(hi / lo) / 2.5)) ** 2)
-        y = np.fft.irfft(spectrum * band, n)
-        bell = np.exp(-0.5 * ((t - spec["peak_s"]) / (spec["dur"] * 0.2)) ** 2)
-        y = y * bell
+    else:
+        raise ValueError(f"unknown sfx category {cat!r}")
     # 10 ms fade at both ends: no clicks.
     edge = int(0.01 * rate)
     y[:edge] *= np.linspace(0, 1, edge)
@@ -112,19 +99,58 @@ def synth(clip_id, rate=RATE):
     return y / peak
 
 
-def loudest_window_db(samples, rate=RATE, window=0.15):
-    """dBFS (RMS, 16-bit full scale = 0 dB) of the loudest `window` seconds of a mono/stereo int-scale array."""
+def _k_weight(x, rate):
+    """Apply the BS.1770 K-weighting magnitude response (shelf + RLB high-pass) in the frequency domain."""
+    import math
+    import numpy as np
+    n = x.shape[0]
+    size = 1 << max(1, int(np.ceil(np.log2(max(n, 2)))))
+    f = np.fft.rfftfreq(size, 1.0 / rate)
+    z = np.exp(-2j * np.pi * f / rate)
+
+    def biquad(b, a):
+        return (b[0] + b[1] * z + b[2] * z * z) / (a[0] + a[1] * z + a[2] * z * z)
+
+    # BS.1770-4 filter parameters, designed per sample rate (bilinear transform).
+    f0, g, q = 1681.974450955533, 3.999843853973347, 0.7071752369554196
+    k = math.tan(math.pi * f0 / rate)
+    vh = 10 ** (g / 20.0)
+    vb = vh ** 0.4996667741545416
+    a0 = 1.0 + k / q + k * k
+    shelf = biquad([(vh + vb * k / q + k * k) / a0, 2.0 * (k * k - vh) / a0, (vh - vb * k / q + k * k) / a0],
+                   [1.0, 2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0])
+    f0, q = 38.13547087602444, 0.5003270373238773
+    k = math.tan(math.pi * f0 / rate)
+    a0 = 1.0 + k / q + k * k
+    hp = biquad([1.0, -2.0, 1.0], [1.0, 2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0])
+    h = shelf * hp
+    spec = np.fft.rfft(x, size, axis=0) * h[:, None]
+    return np.fft.irfft(spec, size, axis=0)[:n]
+
+
+def integrated_lufs(samples, rate=RATE):
+    """Integrated loudness (LUFS, BS.1770: K-weighted, 400 ms blocks / 75 % overlap, -70 LUFS absolute
+    and -10 LU relative gates) of a float array scaled to +-1.0, shape (n,) or (n, channels)."""
     import numpy as np
     x = np.asarray(samples, dtype=np.float64)
-    if x.ndim == 2:
-        x = x.mean(axis=1)
-    w = max(1, int(window * rate))
-    if len(x) <= w:
-        rms = np.sqrt(np.mean(x ** 2)) if len(x) else 0.0
-    else:
-        c = np.concatenate([[0.0], np.cumsum(x ** 2)])
-        rms = np.sqrt(np.max(c[w:] - c[:-w]) / w)
-    return 20 * np.log10(max(rms, 1e-9) / 32768.0)
+    if x.ndim == 1:
+        x = x[:, None]
+    if not len(x):
+        return float("-inf")
+    y = _k_weight(x, rate)
+    w, hop = int(0.4 * rate), int(0.1 * rate)
+    if len(y) < w:
+        y = np.concatenate([y, np.zeros((w - len(y), y.shape[1]))])
+    c = np.concatenate([np.zeros((1, y.shape[1])), np.cumsum(y ** 2, axis=0)])
+    starts = np.arange(0, len(y) - w + 1, hop)
+    z = ((c[starts + w] - c[starts]) / w).sum(axis=1)          # channel weights are 1.0 (L/R/C)
+    lk = -0.691 + 10 * np.log10(np.maximum(z, 1e-20))
+    z = z[lk > -70.0]
+    if not len(z):
+        return float("-inf")
+    rel = -0.691 + 10 * np.log10(z.mean()) - 10.0
+    z = z[-0.691 + 10 * np.log10(z) > rel]
+    return float(-0.691 + 10 * np.log10(z.mean()))
 
 
 # ------------------------------------------------------------------ planning
@@ -140,24 +166,38 @@ def block_changes(timeline, kinds, fixed):
     return out
 
 
-def plan_transitions(changes, total, seed=0):
-    """Pick cuts for soft hits: ~4-8 per minute, varied clips, never the same clip twice running."""
+def _sections(timeline, kinds):
+    """Section id per shot: the script slide it belongs to; a chapter card always opens a new one."""
+    out, sec, prev_slide = [], 0, None
+    for g, shot in enumerate(timeline["shots"]):
+        slide = shot.get("slide", 0)
+        kind = kinds[g] if g < len(kinds) else None
+        if g and (slide != prev_slide or kind == "chapter_card"):
+            sec += 1
+        out.append(sec)
+        prev_slide = slide
+    return out
+
+
+def plan_transitions(changes, total, seed=0, sections=None):
+    """Pick cuts for soft cues: at most one per section, only on chapter cards (swell) or
+    kinetic text / count-ups (chime), >= 60/max_per_min s apart, never the same clip twice running.
+
+    changes: [(cut_time, new_kind)]; sections: parallel list of section ids (None: each change is
+    its own section)."""
+    if not enabled():
+        return []
     r = audio_rules()
     min_gap = 60.0 / r["max_per_min"]
-    target_gap = 60.0 / ((r["min_per_min"] + r["max_per_min"]) / 2)
     rng = random.Random(seed)
-    events, last, last_clip = [], -1e9, None
-    pools = {c: _by_category(c) for c in ("chime", "whoosh", "swell")}
+    events, last, last_clip, used = [], -1e9, None, set()
+    pools = {c: _by_category(c) for c in ("chime", "swell")}
     turn = {c: rng.randrange(len(p)) for c, p in pools.items()}
     for k, (t, kind) in enumerate(changes):
-        if t < 0.3 or t > total - 0.3 or t - last < min_gap:
+        cat = CUE_FOR_KIND.get(kind)
+        sec = sections[k] if sections is not None else k
+        if cat is None or sec in used or t < 0.3 or t > total - 0.3 or t - last < min_gap:
             continue
-        priority = kind in SWELL_KINDS
-        nxt = next((t2 for t2, _ in changes[k + 1:] if t2 > t), float("inf"))
-        # Hit this cut if it is a chapter, the target spacing has passed, or waiting would drop below 4/min.
-        if not (priority or t - last >= target_gap or nxt - last > 60.0 / r["min_per_min"]):
-            continue
-        cat = _category_for(kind)
         pool = pools[cat]
         clip = pool[turn[cat] % len(pool)]
         turn[cat] += 1
@@ -167,32 +207,53 @@ def plan_transitions(changes, total, seed=0):
         start = max(0.0, t - CLIPS[clip]["peak_s"])
         events.append({"t": round(start, 3), "clip": clip, "cut": round(t, 3), "gain_db": round(rng.uniform(-1.5, 0.0), 2)})
         last, last_clip = t, clip
+        used.add(sec)
     return events
 
 
 def plan(timeline, kinds, fixed, seed=0):
-    """Soft transition hits only (the old keyboard clicks under code panels are gone: calmer mix)."""
-    return sorted(plan_transitions(block_changes(timeline, kinds, fixed), timeline["total"], seed),
-                  key=lambda e: e["t"])
+    """Calm cues only: no noise sweeps, no keyboard clicks; at most one per section. [] when DYPOL_SFX=off."""
+    if not enabled():
+        return []
+    secs = _sections(timeline, kinds)
+    changes, change_secs, prev = [], [], None
+    for g, shot in enumerate(timeline["shots"]):
+        unit = fixed.get(g, {}).get("block_id") or f"shot{g}"
+        if g and unit != prev:
+            changes.append((shot["start"], kinds[g] if g < len(kinds) else None))
+            change_secs.append(secs[g])
+        prev = unit
+    return sorted(plan_transitions(changes, timeline["total"], seed, change_secs), key=lambda e: e["t"])
 
 
 def per_minute(events, total):
     return round(len(events) / max(1e-6, total / 60.0), 2)
 
 
+def _load_float(path):
+    """(samples float +-1.0 shaped (n, ch), rate) via pydub (wav/mp3/...)."""
+    import numpy as np
+    from pydub import AudioSegment
+    seg = AudioSegment.from_file(str(path))
+    x = np.array(seg.get_array_of_samples(), dtype=np.float64).reshape(-1, seg.channels)
+    return x / float(1 << (8 * seg.sample_width - 1)), seg.frame_rate
+
+
 def build_track(events, total, out_wav, voice_wav):
     """Render the events to one 48 kHz stereo wav, levelled against the narration; None if nothing to add.
 
-    Each clip's loudest 150 ms is set `under_db` (>= 18 dB) below the narration's overall level
-    (which includes pauses, so the real gap to speech is larger). Mixed in a numpy buffer."""
-    if not events:
+    Each clip is gained so its integrated loudness (as the stereo track carries it) is `under_db`
+    (>= 24 dB) below the narration's integrated LUFS. Mixed in a numpy buffer."""
+    if not events or not enabled():
         return None
     import wave
     import numpy as np
-    from pydub import AudioSegment
     r = audio_rules()
-    voice = AudioSegment.from_file(str(voice_wav))
-    voice_db = voice.dBFS if voice.dBFS != float("-inf") else -20.0
+    voice, vrate = _load_float(voice_wav)
+    voice_lufs = integrated_lufs(voice, vrate)
+    if voice_lufs == float("-inf"):
+        voice_lufs = -23.0
+    target = voice_lufs - r["under_db"]
     n = int(total * RATE)
     track = np.zeros((n + RATE // 20, 2), dtype=np.float64)
     cache = {}
@@ -200,17 +261,17 @@ def build_track(events, total, out_wav, voice_wav):
         if e["clip"] not in CLIPS:
             continue
         if e["clip"] not in cache:
-            mono = synth(e["clip"]) * 32767.0
-            gain = voice_db - r["under_db"] - loudest_window_db(mono)
-            mono = mono * (10 ** (gain / 20.0))
-            cache[e["clip"]] = np.stack([mono, mono], axis=1)
+            mono = synth(e["clip"])
+            stereo = np.stack([mono, mono], axis=1)
+            gain = target - integrated_lufs(stereo)
+            cache[e["clip"]] = stereo * (10 ** (gain / 20.0))
         clip = cache[e["clip"]] * (10 ** (min(0.0, float(e.get("gain_db", 0.0))) / 20.0))
         at = int(round(float(e["t"]) * RATE))
         if at >= len(track) or at < 0:
             continue
         clip = clip[: len(track) - at]
         track[at: at + len(clip)] += clip
-    pcm = np.clip(np.round(track[:n]), -32768, 32767).astype("<i2")
+    pcm = np.clip(np.round(track[:n] * 32767.0), -32768, 32767).astype("<i2")
     with wave.open(str(out_wav), "wb") as wf:
         wf.setnchannels(2)
         wf.setsampwidth(2)
