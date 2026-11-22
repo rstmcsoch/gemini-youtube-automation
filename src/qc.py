@@ -9,6 +9,7 @@ import json
 import math
 import re
 import subprocess
+import sys
 from io import BytesIO
 from pathlib import Path
 
@@ -61,7 +62,8 @@ def resolution_problem(label, width, height):
 
 def hard_failures(report, relevance=None):
     """Owner-rule failures that make the draft "needs fixes": off-topic script, resolution outside
-    720p-1080p, a static picture longer than 3.5 s, a true peak above -1 dBTP (4 Nov 2026)."""
+    720p-1080p, a static picture longer than 3.5 s, a true peak above -1 dBTP (4 Nov 2026), a Short
+    narration outside 150-165 WPM ("pace_out_of_band", 22 Nov 2026)."""
     out = []
     if isinstance(relevance, dict) and relevance.get("verdict") == "off_topic":
         out.append("off-topic script: " + "; ".join(relevance.get("reasons") or [])[:300])
@@ -76,6 +78,13 @@ def hard_failures(report, relevance=None):
             if (f.get("duration") or 0) > HARD_STATIC_S:
                 out.append(f"{label}: picture static for {f['duration']:.1f} s at {f['start']:.1f} s "
                            f"(limit {HARD_STATIC_S:g} s)")
+    pace = (report or {}).get("short_pace")
+    if pace is None and "short" in ((report or {}).get("videos") or {}):
+        prod = sys.modules.get("src.production")      # set by fit_short_audio in this run
+        pace = prod.last_short_pace() if prod is not None else None
+    if isinstance(pace, dict) and pace.get("wpm") is not None and pace.get("in_band") is False:
+        out.append(f"pace_out_of_band: short narration {float(pace['wpm']):.0f} WPM "
+                   f"(rule 150-165 WPM)")
     return out
 
 

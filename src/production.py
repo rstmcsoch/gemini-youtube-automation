@@ -980,7 +980,43 @@ def fit_short_audio(tts_fn, script, cta, work_dir, lo=None, hi=None, expand_fn=N
             dur = ex.audio_duration(voice)
             if dur > hi:
                 voice = ex.change_tempo(voice, work_dir / "short_voice_fast.wav", min(1.25, dur / (hi - 1.0)))
+    voice = _short_pace_gate(script, voice, work_dir)
     return script, voice
+
+
+# Final Short pace gate (22 Nov 2026: a Short shipped at 139 WPM; rule 150-165).
+SHORT_WPM_MIN, SHORT_WPM_MAX, SHORT_WPM_TARGET, SHORT_PACE_MAX_TEMPO = 150.0, 165.0, 157.0, 1.12
+_SHORT_PACE = {}
+
+
+def last_short_pace():
+    """{"wpm", "words", "seconds", "tempo", "in_band"} of the last fit_short_audio, or {}."""
+    return dict(_SHORT_PACE)
+
+
+def _short_pace_gate(script, voice, work_dir):
+    """Measure the finished Short voice; under 150 WPM -> atempo towards 157 (cap x1.12), word
+    timings carried by ex.change_tempo. The result is kept for QC (out of band = hard failure)."""
+    from src import short_rules as sr
+    _SHORT_PACE.clear()
+    words = len(str(script or "").split())
+    dur = ex.audio_duration(voice)
+    if words < 40 or dur <= 0:        # a fragment gives no meaningful pace
+        return voice
+    measured, tempo = sr.wpm(words, dur), 1.0
+    if measured < SHORT_WPM_MIN:
+        tempo = round(min(SHORT_PACE_MAX_TEMPO, SHORT_WPM_TARGET / measured), 4)
+        voice = ex.change_tempo(voice, Path(work_dir) / "short_voice_pace.wav", tempo)
+        dur = ex.audio_duration(voice)
+        _log(f"short: pace {measured:.0f} WPM < {SHORT_WPM_MIN:.0f}; atempo x{tempo:.3f} -> "
+             f"{sr.wpm(words, dur):.0f} WPM")
+        measured = sr.wpm(words, dur)
+    in_band = SHORT_WPM_MIN - 0.5 <= measured <= SHORT_WPM_MAX + 0.5
+    _SHORT_PACE.update({"wpm": round(measured, 1), "words": words, "seconds": round(dur, 2),
+                        "tempo": tempo, "in_band": in_band})
+    if not in_band:
+        _log(f"short: final pace {measured:.0f} WPM is outside {SHORT_WPM_MIN:.0f}-{SHORT_WPM_MAX:.0f}")
+    return voice
 
 
 _SENT = re.compile(r"(?<=[.!?])\s+")

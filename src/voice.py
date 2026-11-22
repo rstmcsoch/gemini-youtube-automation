@@ -20,8 +20,11 @@ beside the WAV (``<name>.words.json``) and read back by src/production.py, which
 block cues, bullet reveals and captions from the word starts.
 
 Pace: the narration targets ``wpm_target`` (150-165 WPM, speech only). After each render the
-measured words-per-minute is checked; outside the band, the text is rendered once more at a
-corrected speed, and that speed is kept for the rest of the run so every slide sounds alike.
+measured words-per-minute is checked; outside the band, the text is re-rendered at a corrected
+speed (at most ``MAX_PACE_RERENDERS`` times). Every slide starts from the configured speed: no speed
+is carried over from an earlier slide (22 Nov 2026: a sticky speed shipped a Short at 139 WPM). The
+first correction is proportional (WPM ~ speed); the second is a secant step through this slide's own
+two measurements, which also absorbs the voice's non-linear speed response.
 """
 import os
 import wave
@@ -49,7 +52,7 @@ DEFAULTS = {"provider": "kokoro", "voice": "am_michael", "speed": 1.08, "lang": 
 
 FALLBACK_VOICE = "am_michael"
 
-_STATE = {"engine": None, "speed": None, "meta": None, "voice": None}
+_STATE = {"engine": None, "meta": None, "voice": None}   # no speed: each slide tunes its own
 
 
 def settings():
@@ -219,6 +222,25 @@ def corrected_speed(measured_wpm, speed, cfg):
     return None if abs(new - speed) < 0.005 else new
 
 
+MAX_PACE_RERENDERS = 2
+
+
+def secant_speed(s0, w0, s1, w1, cfg):
+    """Next speed from two (speed, WPM) measurements of the same text: the secant through them hit
+    at ``wpm_target``; falls back to the proportional step when the two WPMs coincide. Clamped."""
+    target = float(cfg["wpm_target"])
+    if abs(w1 - w0) < 1e-6 or abs(s1 - s0) < 1e-9:
+        new = s1 * target / w1 if w1 > 0 else s1
+    else:
+        new = s1 + (target - w1) * (s1 - s0) / (w1 - w0)
+    new = round(min(float(cfg["speed_max"]), max(float(cfg["speed_min"]), new)), 3)
+    return None if abs(new - s1) < 0.005 else new
+
+
+def _in_band(measured, cfg):
+    return float(cfg["wpm_min"]) <= measured <= float(cfg["wpm_max"])
+
+
 def write_wav(samples, rate, path):
     import numpy as np
     pcm = (np.clip(np.asarray(samples, dtype="float32"), -1.0, 1.0) * 32767.0).astype("<i2")
@@ -237,23 +259,33 @@ def kokoro_speech(text, wav_path, cfg=None):
         raise RuntimeError("empty narration text")
     engine = _engine(cfg)
     voice_arg, voice_name = _voice_arg(engine, cfg)
-    speed = _STATE["speed"] or cfg["speed"]
+    speed = float(cfg["speed"])          # every slide starts here; nothing carried over
     words = len(text.split())
     Path(timings_path(wav_path)).unlink(missing_ok=True)   # never leave a stale sidecar
     samples, rate, phones = _render(engine, text, voice_arg, speed, cfg["lang"])
     seconds = len(samples) / float(rate) if samples is not None else 0.0
     measured = wpm(words, seconds)
+    tried = [(speed, measured, samples, rate, phones)]
     # Short fragments (a hook line) give a noisy rate: only tune the pace on 40+ words.
-    new = corrected_speed(measured, speed, cfg) if words >= 40 else None
-    if new is not None:
+    while words >= 40 and measured > 0 and not _in_band(measured, cfg) \
+            and len(tried) <= MAX_PACE_RERENDERS:
+        if len(tried) == 1:
+            new = corrected_speed(measured, speed, cfg)
+        else:
+            (s0, w0, *_), (s1, w1, *_) = tried[-2], tried[-1]
+            new = secant_speed(s0, w0, s1, w1, cfg)
+        if new is None or any(abs(new - t[0]) < 0.005 for t in tried):
+            break
         print(f"🎤 pace {measured:.0f} WPM at speed {speed}; re-rendering at {new} "
               f"(target {cfg['wpm_min']}-{cfg['wpm_max']})", flush=True)
         samples, rate, phones = _render(engine, text, voice_arg, new, cfg["lang"])
-        seconds = len(samples) / float(rate)
-        measured = wpm(words, seconds)
-        speed = new
-    if words >= 40:
-        _STATE["speed"] = speed   # keep one pace across slides
+        seconds = len(samples) / float(rate) if samples is not None else 0.0
+        speed, measured = new, wpm(words, seconds)
+        tried.append((speed, measured, samples, rate, phones))
+    if len(tried) > 1:   # keep the render closest to the target
+        target = float(cfg["wpm_target"])
+        speed, measured, samples, rate, phones = min(tried, key=lambda t: abs(t[1] - target))
+        seconds = len(samples) / float(rate) if samples is not None else 0.0
     if samples is None or seconds < 0.5 or not (1.2 <= words / max(seconds, 0.01) <= 4.5):
         raise RuntimeError(f"Kokoro audio implausible ({seconds:.1f}s for {words} words)")
     write_wav(samples, rate, wav_path)
@@ -518,4 +550,4 @@ def last_meta():
 
 
 def reset():
-    _STATE.update({"engine": None, "speed": None, "meta": None, "voice": None})
+    _STATE.update({"engine": None, "meta": None, "voice": None})

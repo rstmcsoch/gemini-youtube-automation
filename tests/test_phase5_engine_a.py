@@ -229,7 +229,8 @@ class _FakeKokoro:
         return np.zeros(int(seconds * 24000), dtype="float32"), 24000
 
 
-def test_kokoro_speech_retunes_pace_once_and_keeps_it(monkeypatch, tmp_path):
+def test_kokoro_speech_retunes_pace_per_slide(monkeypatch, tmp_path):
+    # 22 Nov 2026: no speed is carried between slides; each slide starts at the configured speed.
     fake = _FakeKokoro()
     monkeypatch.setattr(voice, "_engine", lambda cfg: fake)
     monkeypatch.setenv("KOKORO_SPEED", "1.08")
@@ -238,7 +239,7 @@ def test_kokoro_speech_retunes_pace_once_and_keeps_it(monkeypatch, tmp_path):
     assert len(fake.calls) == 2 and fake.calls[0][0] == "am_michael" and fake.calls[0][2] == "en-us"
     assert 150 <= meta["wpm"] <= 165
     voice.kokoro_speech(text, tmp_path / "b.wav")
-    assert len(fake.calls) == 3 and fake.calls[2][1] == meta["speed"]       # kept, no re-render
+    assert len(fake.calls) == 4 and fake.calls[2][1] == 1.08                # starts fresh
     with wave.open(str(tmp_path / "b.wav")) as wf:
         assert wf.getframerate() == 24000 and wf.getsampwidth() == 2
 
