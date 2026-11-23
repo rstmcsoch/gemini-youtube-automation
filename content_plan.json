@@ -68,8 +68,9 @@
       "chapter": "MLOps - Bringing AI to Production",
       "part": 30,
       "title": "Orchestrating AI with Kubernetes (Basics): Managing Your AI Fleet (Like a Conductor Leading an Orchestra)",
-      "status": "pending",
-      "youtube_id": null
+      "status": "draft_ready",
+      "youtube_id": null,
+      "uploads": []
     },
     {
       "chapter": "MLOps - Bringing AI to Production",
